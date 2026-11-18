@@ -2,7 +2,7 @@
 # Builds a release binary and wraps it in SiliconMonitor.app (menu bar only, no Dock icon).
 set -e
 cd "$(dirname "$0")"
-VERSION="${VERSION:-1.0}"   # shown in Finder's Get Info; override with VERSION=1.1 ./bundle.sh
+VERSION="${VERSION:-1.1}"   # shown in Finder's Get Info; override with VERSION=1.1 ./bundle.sh
 swift build -c release
 APP=SiliconMonitor.app
 rm -rf "$APP"
@@ -27,8 +27,12 @@ cat > "$APP/Contents/Info.plist" <<EOF
 EOF
 # Sign with the local self-signed identity when it exists: a stable signature keeps the Accessibility and
 # Input Monitoring grants across rebuilds. Falls back to ad-hoc (grants then reset on every rebuild).
+# For distribution: DEVELOPER_ID="Developer ID Application: Your Name (TEAMID)" ./bundle.sh
+# signs with the hardened runtime, which Apple's notarization requires.
 IDENTITY="SiliconMonitor Local Signing"
-if security find-identity -p codesigning 2>/dev/null | grep -q "$IDENTITY"; then
+if [ -n "$DEVELOPER_ID" ]; then
+  codesign --force --options runtime --timestamp --sign "$DEVELOPER_ID" "$APP"
+elif security find-identity -p codesigning 2>/dev/null | grep -q "$IDENTITY"; then
   codesign --force --sign "$IDENTITY" "$APP"
 else
   echo "Note: identity '$IDENTITY' not found; signing ad-hoc"

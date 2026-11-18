@@ -133,7 +133,9 @@ final class FanController: ObservableObject {
             let hot = text.contains("thermal")
             closeConnection()
             manual = false
-            message = hot ? "The Mac got hot, so the fans went back to automatic." : "Fans are back on automatic."
+            let detail = text.split(separator: "\n").first(where: { $0.contains("thermal") })
+                .map { $0.split(separator: " ").dropFirst(2).joined(separator: " ") } ?? ""
+            message = hot ? "The Mac got hot (\(detail)), so the fans went back to automatic." : "Fans are back on automatic."
         }
     }
 

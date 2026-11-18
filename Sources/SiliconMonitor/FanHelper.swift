@@ -17,7 +17,7 @@ import CSMC
 // process is stopped, or the chip reaches 95 C (manual control is then refused until it cools to 85 C).
 
 /// Bump when the protocol changes; the app reinstalls the helper if the versions differ.
-let fanHelperVersion = 3
+let fanHelperVersion = 4
 
 nonisolated(unsafe) private var helperSocketPath = ""
 nonisolated(unsafe) private var thermalBlocked = false   // set after a thermal revert; cleared once cooled
@@ -51,8 +51,10 @@ private func applyFanPercent(_ percent: Double) {
     }
 }
 
-private func hottestTemperature(keys: [String]) -> Double {
-    keys.compactMap(readSMC).filter { $0 > 5 && $0 < 130 }.max() ?? 0
+private func hottestTemperature(keys: [String]) -> (name: String, value: Double) {
+    var best = (name: "", value: 0.0)
+    for k in keys { if let v = readSMC(k), v > 5, v < 130, v > best.value { best = (k, v) } }
+    return best
 }
 
 private func temperatureKeys() -> [String] {
@@ -78,6 +80,7 @@ private func serve(client: Int32, tempKeys: [String]) {
     reply("HELLO \(fanHelperVersion)")
 
     let tooHot = 95.0, cooledTo = 85.0
+    var hotReadings = 0   // consecutive hot samples; one stray SMC reading must not cancel manual fans
     var manualOn = false
     var lidOn = false
     var lastBeat = Date()
@@ -118,10 +121,11 @@ private func serve(client: Int32, tempKeys: [String]) {
         if Date().timeIntervalSince(lastBeat) > 10 { break }             // app went silent
 
         let t = hottestTemperature(keys: tempKeys)
-        if manualOn && t >= tooHot {
+        hotReadings = t.value >= tooHot ? hotReadings + 1 : 0
+        if manualOn && hotReadings >= 3 {   // about 6 s sustained
             restoreAutomaticFans(); manualOn = false; thermalBlocked = true
-            reply("AUTO thermal \(Int(t))")
-        } else if thermalBlocked && t < cooledTo {
+            reply("AUTO thermal \(Int(t.value)) \(t.name)")
+        } else if thermalBlocked && t.value < cooledTo {
             thermalBlocked = false
         }
     }

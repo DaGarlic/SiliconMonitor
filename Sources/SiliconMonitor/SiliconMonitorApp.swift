@@ -62,6 +62,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let fanControl = FanController()
     let logo = LogoControl()
     let tools = SystemToggles()
+    let updates = UpdateChecker()
 
     private var statusItem: NSStatusItem!
     private var card: CardPanel!
@@ -86,7 +87,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .environmentObject(power)
             .environmentObject(fanControl)
             .environmentObject(logo)
-            .environmentObject(tools))
+            .environmentObject(tools)
+            .environmentObject(updates))
         let made = CardWindow.make(AnyView(EmptyView()))
         card = made.panel
         host = made.host
@@ -125,6 +127,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         monitor.start()
+        updates.start()
         updateStatusItem()
         // Debug aid: SILICONMONITOR_SHOW_CARD=1 opens the card shortly after launch (for screenshots/measuring).
         if ProcessInfo.processInfo.environment["SILICONMONITOR_SHOW_CARD"] == "1" {
@@ -349,6 +352,7 @@ struct ContentView: View {
     @EnvironmentObject var f: FanController
     @EnvironmentObject var l: LogoControl
     @EnvironmentObject var t: SystemToggles
+    @EnvironmentObject var u: UpdateChecker
     let onQuit: () -> Void
 
     private let five = Array(repeating: GridItem(.flexible(), spacing: 6), count: 3)   // menu bar toggles are slim pills, three per row
@@ -360,6 +364,14 @@ struct ContentView: View {
 
     private var mainStack: some View {
         VStack(alignment: .leading, spacing: 10) {
+            if let v = u.latestVersion {
+                Button(action: { u.openDownload() }) {
+                    Label("Version \(v) is available. Click to download.", systemImage: "arrow.down.circle")
+                        .font(.caption.weight(.medium)).foregroundStyle(.blue)
+                }
+                .buttonStyle(.plain)
+                .help("Opens the release page on GitHub. You are on \(UpdateChecker.currentVersion).")
+            }
             networkSection
             batterySection
             graph("CPU", value: m.cpu, temp: m.cpuTemp, history: m.cpuHistory, color: .blue)
