@@ -23,7 +23,7 @@ final class FanController: ObservableObject {
 
     var isMax: Bool { manual && percent >= 100 }
 
-    private enum Connection { case ok, unreachable, busy, wrongVersion }
+    enum Connection { case ok, unreachable, busy, wrongVersion }
 
     private var fd: Int32 = -1
     private var reader: DispatchSourceRead?
@@ -110,28 +110,10 @@ final class FanController: ObservableObject {
     }
 
     private func connect() -> Connection {
-        let s = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard s >= 0 else { return .unreachable }
-        var addr = sockaddr_un()
-        addr.sun_family = sa_family_t(AF_UNIX)
-        withUnsafeMutableBytes(of: &addr.sun_path) { buf in
-            Self.socketPath.withCString { _ = strncpy(buf.baseAddress!.assumingMemoryBound(to: CChar.self), $0, buf.count - 1) }
-        }
-        let len = socklen_t(MemoryLayout<sockaddr_un>.size)
-        addr.sun_len = UInt8(len)
-        let r = withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.connect(s, $0, len) } }
-        guard r == 0 else { close(s); return .unreachable }
-        var one: Int32 = 1
-        setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
-
-        // The helper greets with its protocol version. No greeting means it is busy serving another client.
-        var pfd = pollfd(fd: s, events: Int16(POLLIN), revents: 0)
-        guard poll(&pfd, 1, 1500) > 0 else { close(s); return .busy }
-        var buf = [UInt8](repeating: 0, count: 64)
-        let n = read(s, &buf, buf.count)
-        let hello = String(decoding: buf.prefix(max(n, 0)), as: UTF8.self)
-        guard hello.hasPrefix("HELLO \(fanHelperVersion)") else { close(s); return n > 0 ? .wrongVersion : .unreachable }
-        fd = s
+        let r = Self.openConnection()
+        guard r.status == .ok else { return r.status }
+        fd = r.fd
+        let s = r.fd
 
         // Listen for the helper's own messages (it can revert on its own, e.g. when too hot).
         let src = DispatchSource.makeReadSource(fileDescriptor: s, queue: .main)
@@ -167,6 +149,32 @@ final class FanController: ObservableObject {
         pendingSend?.cancel(); pendingSend = nil
         reader?.cancel(); reader = nil
         if fd >= 0 { close(fd); fd = -1 }
+    }
+
+    /// Opens a connection to the root helper and checks its protocol version. Shared with PowerMode (lid sleep).
+    nonisolated static func openConnection() -> (fd: Int32, status: Connection) {
+        let s = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard s >= 0 else { return (-1, .unreachable) }
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        withUnsafeMutableBytes(of: &addr.sun_path) { buf in
+            socketPath.withCString { _ = strncpy(buf.baseAddress!.assumingMemoryBound(to: CChar.self), $0, buf.count - 1) }
+        }
+        let len = socklen_t(MemoryLayout<sockaddr_un>.size)
+        addr.sun_len = UInt8(len)
+        let r = withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.connect(s, $0, len) } }
+        guard r == 0 else { close(s); return (-1, .unreachable) }
+        var one: Int32 = 1
+        setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+
+        // The helper greets with its protocol version. No greeting means it is busy serving another client.
+        var pfd = pollfd(fd: s, events: Int16(POLLIN), revents: 0)
+        guard poll(&pfd, 1, 1500) > 0 else { close(s); return (-1, .busy) }
+        var buf = [UInt8](repeating: 0, count: 64)
+        let n = read(s, &buf, buf.count)
+        let hello = String(decoding: buf.prefix(max(n, 0)), as: UTF8.self)
+        guard hello.hasPrefix("HELLO \(fanHelperVersion)") else { close(s); return (-1, n > 0 ? .wrongVersion : .unreachable) }
+        return (s, .ok)
     }
 
     // MARK: Installing the helper

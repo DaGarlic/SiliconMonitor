@@ -20,7 +20,11 @@ only the Command Line Tools.
 **Monitoring**
 - CPU and GPU load as 1-minute rolling graphs, plus one bar per CPU core, colored by core tier
 - CPU and GPU temperature, and the speed of each fan
-- Choose what appears in the menu bar: CPU, GPU, fan speed, CPU temp, GPU temp (fixed-width text, so it doesn't jitter)
+- Disk: remaining storage on the startup volume (read and write speed in the tooltip)
+- Battery health and charge cycle count
+- Network download and upload speed, and the power the whole Mac is drawing (watts)
+- RAM used and memory pressure (normal, warning, critical)
+- Choose what appears in the menu bar: CPU, GPU, fan speed, CPU temp, GPU temp, free disk space (fixed-width text, so it doesn't jitter)
 
 **Fan control**
 - Auto (macOS decides), Manual with a slider from each fan's minimum to maximum speed, or **Max**
@@ -30,7 +34,7 @@ only the Command Line Tools.
 - **Keys**: lock the keyboard while you clean it (auto-releases after 5 minutes)
 - **Screen**: black out every display for cleaning (Esc or 2 minutes ends it)
 - **Stay on**: keep the display from sleeping
-- **Lid**: stay awake with the lid closed (`pmset disablesleep`, asks for your admin password)
+- **Lid**: stay awake with the lid closed (`pmset disablesleep`, run by the helper, so no password prompt after the one-time install; it reverts if the app quits or crashes)
 - **Logo**: the glowing Apple logo, on or off, with **Breathe**, **Pulse**, **Beat** and **Dim** modes
   (MacBook Pro with a PROLED XDR display only; the tile doesn't appear on other Macs)
 - **Dark**: dark or light appearance
@@ -42,6 +46,17 @@ only the Command Line Tools.
 - macOS 14 or later, Apple Silicon (M-series)
 - Command Line Tools (`xcode-select --install`), which include Swift
 - Some tiles only appear when the hardware exists (Logo, Key light)
+
+## Download
+
+Grab the latest **`SiliconMonitor-x.y.dmg`** from the [Releases](https://github.com/DaGarlic/SiliconMonitor/releases)
+page, open it and drag **SiliconMonitor** onto **Applications**. No Xcode or Command Line Tools needed.
+
+The app isn't notarized by Apple, so macOS blocks the first launch ("cannot be opened because the developer cannot be
+verified"). To open it anyway, use either of these once:
+
+- Open **System Settings › Privacy & Security**, scroll down and click **Open Anyway**, or
+- run `xattr -dr com.apple.quarantine /Applications/SiliconMonitor.app` in Terminal.
 
 ## Build and run
 
@@ -68,16 +83,53 @@ identity once:
 `bundle.sh` signs with it automatically when it exists. The script only adds one certificate to your login keychain
 and changes no trust settings.
 
+## Updating
+
+**From the DMG:** quit SiliconMonitor (Quit button in the card), download the newer `.dmg`, and drag the app onto
+**Applications**, choosing **Replace**. Then open it again.
+
+**From source:**
+
+```sh
+cd SiliconMonitor
+git pull
+./bundle.sh
+```
+
+Quit the running copy and open the new `SiliconMonitor.app` (or copy it over the one in Applications).
+
+Things to expect after an update:
+
+- **The fan helper updates itself.** If a new version changes how the app talks to the helper, the app asks for your
+  admin password once, the first time you use fan control or the Lid tool, and reinstalls it. Otherwise nothing happens.
+- **Permissions may need granting again.** macOS ties Accessibility and Input Monitoring (keyboard cleaning) to the
+  app's code signature, and downloaded builds are signed ad hoc, so each new version can look like a new app. If Keys
+  stops working, remove SiliconMonitor from those two lists in **Privacy & Security** and add it again.
+- **Your settings are kept** (menu bar choices, fan percentage and so on).
+
+To remove the app completely, quit it, delete it from Applications, and run `./tools/uninstall_fan_helper.sh` if you
+ever installed the fan helper.
+
+## Making a release (maintainers)
+
+```sh
+./tools/make_dmg.sh 1.1          # builds SiliconMonitor-1.1.dmg (version number is optional)
+gh release create v1.1 SiliconMonitor-1.1.dmg --title "SiliconMonitor 1.1" --notes "What changed"
+```
+
+`make_dmg.sh` runs `bundle.sh` with that version, packs the app with an Applications shortcut, and verifies the image.
+Because the app uses private macOS interfaces and is not notarized, it can't go through the Mac App Store.
+
 ## Fan control and the helper
 
-Writing the fan keys needs root. The first time you switch the fans to Manual or Max, the app asks for your admin
-password and installs a small helper:
+Writing the fan keys (and `pmset disablesleep` for the Lid tool) needs root. The first time you use either, the app asks
+for your admin password and installs a small helper:
 
 - `/Library/PrivilegedHelperTools/local.siliconmonitor.fanhelper` (a root-owned copy of the app's own binary)
 - `/Library/LaunchDaemons/local.siliconmonitor.fanhelper.plist`
 
 It listens on a Unix socket (`/var/run/local.siliconmonitor.fan.sock`) and **only accepts connections from the user
-that installed it** (checked with the peer's real uid). It can only set fan speeds. After the one-time install there
+that installed it** (checked with the peer's real uid). It can only set fan speeds and switch lid-closed sleep on or off. After the one-time install there
 are no more password prompts. To remove it:
 
 ```sh
@@ -136,7 +188,8 @@ SILICONMONITOR_SHOW_CARD=1 open ...                  # open the card at launch (
 | `Sources/SiliconMonitor/SystemTools.swift` | Dark mode, keyboard backlight, desktop icons |
 | `Sources/SiliconMonitor/Cleaning.swift`, `PowerMode.swift` | Keyboard and screen cleaning, keep-awake |
 | `bundle.sh` | Builds and signs `SiliconMonitor.app` |
-| `tools/` | Icon generator, signing-identity and uninstall scripts |
+| `tools/make_dmg.sh` | Packs the app into a downloadable `.dmg` |
+| `tools/` | Icon generator, signing-identity, DMG and uninstall scripts |
 
 ## Known limitations
 

@@ -39,6 +39,8 @@ final class CardPanel: NSPanel {
 final class RoundedHostingView<Content: View>: NSHostingView<Content> {
     /// Called when the SwiftUI content's ideal size changes (a row appeared or went away), so the card can resize.
     var onContentSizeChange: (() -> Void)?
+    /// The hairline edge suits the plain material; Liquid Glass supplies its own, so it turns this off.
+    var drawsBorder = true { didSet { layer?.borderWidth = drawsBorder ? 0.5 : 0 } }
 
     override func invalidateIntrinsicContentSize() {
         super.invalidateIntrinsicContentSize()
@@ -96,19 +98,31 @@ enum CardWindow {
         panel.hidesOnDeactivate = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
 
-        let effect = NSVisualEffectView(frame: panel.contentRect(forFrameRect: panel.frame))
-        effect.material = .popover
-        effect.blendingMode = .behindWindow
-        // .inactive draws the material without the live behind-window blur. A live blur is recomputed whenever
-        // anything inside the window moves (the scrolling graphs), which cost ~17% GPU; this costs ~0%.
-        effect.state = .inactive
-        effect.maskImage = roundedMask(radius: CardStyle.cornerRadius)
-
+        let bounds = panel.contentRect(forFrameRect: panel.frame)
         let host = RoundedHostingView(rootView: content)
-        host.frame = effect.bounds
+        host.frame = bounds
         host.autoresizingMask = [.width, .height]
-        effect.addSubview(host)
-        panel.contentView = effect
+
+        if #available(macOS 26, *) {
+            // Liquid Glass: the system's glass material, with the same continuous corner as the card.
+            let glass = NSGlassEffectView(frame: bounds)
+            glass.cornerRadius = CardStyle.cornerRadius
+            glass.contentView = host
+            if #available(macOS 27, *) { glass.effectIsInteractive = false }   // no hover/press response on the background
+            panel.contentView = glass
+            host.drawsBorder = false   // the glass draws its own edge highlight
+            panel.hasShadow = false    // the system window shadow showed as a dark outline around the glass
+        } else {
+            let effect = NSVisualEffectView(frame: bounds)
+            effect.material = .popover
+            effect.blendingMode = .behindWindow
+            // .inactive draws the material without the live behind-window blur. A live blur is recomputed whenever
+            // anything inside the window moves (the scrolling graphs), which cost ~17% GPU; this costs ~0%.
+            effect.state = .inactive
+            effect.maskImage = roundedMask(radius: CardStyle.cornerRadius)
+            effect.addSubview(host)
+            panel.contentView = effect
+        }
         return (panel, host)
     }
 

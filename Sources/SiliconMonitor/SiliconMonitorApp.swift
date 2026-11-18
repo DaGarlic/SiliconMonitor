@@ -14,6 +14,13 @@ enum Entry {
             print(String(format: "CPU %.1f%%  GPU %.1f%%", m.cpu, m.gpu))
             print("CPU temp: \(m.cpuTemp.map { String(format: "%.1f°C", $0) } ?? "n/a")")
             print("GPU temp: \(m.gpuTemp.map { String(format: "%.1f°C", $0) } ?? "n/a")")
+            print(String(format: "Disk: read %@  write %@  free %.0f of %.0f GB", Monitor.rate(m.diskRead), Monitor.rate(m.diskWrite),
+                         Double(m.diskFree) / 1e9, Double(m.diskTotal) / 1e9))
+            print("Battery: health \(m.batteryHealth.map { String(format: "%.0f%%", $0) } ?? "n/a"), cycles \(m.cycleCount.map(String.init) ?? "n/a")")
+            print(String(format: "Memory: %.1f of %.0f GB, swap %.1f GB, pressure level %d", Double(m.memUsed) / 1_073_741_824, Double(m.memTotal) / 1_073_741_824,
+                         Double(m.swapUsed) / 1_073_741_824, m.memPressure))
+            print(String(format: "Network: down %@  up %@   Power: %@ W (adapter %@ W)", Monitor.rate(m.netDown), Monitor.rate(m.netUp),
+                         m.systemPower.map { String(format: "%.1f", $0) } ?? "n/a", m.adapterPower.map { String(format: "%.1f", $0) } ?? "n/a"))
             print("Fans: \(m.fans.map { String(format: "#%d %.0f rpm (min %.0f, max %.0f)", $0.id, $0.rpm, $0.min, $0.max) })")
             exit(0)
         }
@@ -90,7 +97,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // menu bar image is only redrawn when its text actually changed.
         monitor.onRefresh = { [weak self] in self?.updateStatusItem(); self?.fitCard() }
         // Setting toggles change the text immediately, between refreshes.
-        monitor.$showCPU.merge(with: monitor.$showGPU, monitor.$showCPUTemp, monitor.$showGPUTemp, monitor.$showFan)
+        monitor.$showCPU.merge(with: monitor.$showGPU, monitor.$showCPUTemp, monitor.$showGPUTemp, monitor.$showFan, monitor.$showDisk)
             .dropFirst().receive(on: RunLoop.main).sink { [weak self] _ in self?.updateStatusItem() }.store(in: &cancellables)
         for o in [cleaning.objectWillChange, power.objectWillChange, fanControl.objectWillChange, logo.objectWillChange, tools.objectWillChange] {
             o.receive(on: RunLoop.main).sink { [weak self] _ in
@@ -137,7 +144,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             img?.isTemplate = true
             b.image = img
         } else {
-            b.image = menuBarImage(title)
+            b.image = menuBarImage(monitor.menuCells)
         }
     }
 
@@ -230,16 +237,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-/// Draws the readout in a monospaced font as a template image, so its width never changes with the numbers
-/// and it follows the menu bar's light/dark colouring.
-func menuBarImage(_ text: String) -> NSImage {
-    let font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
-    let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.black]
-    let str = NSAttributedString(string: text, attributes: attrs)
-    let size = NSSize(width: ceil(str.size().width), height: 18)
+/// Draws the readout as compact stacked cells (a tiny label over the value) in one template image, so it follows the
+/// menu bar's light/dark colouring. Each cell has a fixed width, so the text never shifts as the numbers change.
+func menuBarImage(_ cells: [Monitor.MenuCell]) -> NSImage {
+    let labelFont = NSFont.systemFont(ofSize: 6.5, weight: .semibold)
+    let valueFont = NSFont.monospacedSystemFont(ofSize: 10.5, weight: .medium)
+    let labelAttrs: [NSAttributedString.Key: Any] = [.font: labelFont, .foregroundColor: NSColor.black.withAlphaComponent(0.6),
+                                                     .kern: 0.3]
+    let valueAttrs: [NSAttributedString.Key: Any] = [.font: valueFont, .foregroundColor: NSColor.black]
+    let gap: CGFloat = 7
+    let widths = cells.map { max(NSAttributedString(string: $0.sample, attributes: valueAttrs).size().width,
+                                 NSAttributedString(string: $0.label, attributes: labelAttrs).size().width).rounded(.up) }
+    let total = widths.reduce(0, +) + gap * CGFloat(max(cells.count - 1, 0))
+    let size = NSSize(width: max(total, 1), height: 22)
     let img = NSImage(size: size, flipped: false) { rect in
-        let h = str.size().height
-        str.draw(at: NSPoint(x: 0, y: (rect.height - h) / 2))
+        var x: CGFloat = 0
+        for (cell, w) in zip(cells, widths) {
+            let l = NSAttributedString(string: cell.label, attributes: labelAttrs)
+            let v = NSAttributedString(string: cell.value, attributes: valueAttrs)
+            l.draw(at: NSPoint(x: x + (w - l.size().width) / 2, y: rect.height - l.size().height - 1.5))
+            v.draw(at: NSPoint(x: x + (w - v.size().width) / 2, y: 1))   // right-aligned digits would jitter; centre instead
+            x += w + gap
+        }
         return true
     }
     img.isTemplate = true
@@ -280,28 +299,42 @@ struct Tile: View {
     var subtitle: String? = nil
     let isOn: Bool
     var disabled = false
+    var inline = false    // slim pill with the icon beside the label, for toggles that only need a name
+    var compact = true   // shorter tile with tighter padding and text (false gives the roomier original size)
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            VStack(alignment: .leading, spacing: 0) {
-                Image(systemName: icon).font(.system(size: 14, weight: .semibold))
-                Spacer(minLength: 6)
-                Text(title).font(.system(size: 11, weight: .semibold)).lineLimit(1).minimumScaleFactor(0.8)
-                if subtitle != "" {
-                    Text(subtitle ?? (isOn ? "On" : "Off"))
-                        .font(.system(size: 10)).opacity(0.75).lineLimit(1).minimumScaleFactor(0.8)
+            Group {
+                if inline {
+                    HStack(spacing: 5) {
+                        Image(systemName: icon).font(.system(size: 12, weight: .semibold))
+                        Text(title).font(.system(size: 11, weight: .semibold)).lineLimit(1).minimumScaleFactor(0.8)
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 9)
+                    .frame(maxWidth: .infinity, minHeight: 30, alignment: .leading)
+                } else {
+                    VStack(alignment: .leading, spacing: 0) {
+                        Image(systemName: icon).font(.system(size: compact ? 13 : 14, weight: .semibold))
+                        Spacer(minLength: compact ? 2 : 6)
+                        Text(title).font(.system(size: compact ? 10 : 11, weight: .semibold)).lineLimit(1).minimumScaleFactor(0.8)
+                        if subtitle != "" {
+                            Text(subtitle ?? (isOn ? "On" : "Off"))
+                                .font(.system(size: 10)).opacity(0.75).lineLimit(1).minimumScaleFactor(0.8)
+                        }
+                    }
+                    .padding(compact ? 6 : 8)
+                    .frame(maxWidth: .infinity, minHeight: compact ? 44 : 46, alignment: .leading)
                 }
             }
-            .padding(9)
-            .frame(maxWidth: .infinity, minHeight: 54, alignment: .leading)
             .foregroundStyle(isOn ? Color.white : Color.primary)
-            .background(RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .background(RoundedRectangle(cornerRadius: inline ? 11 : 14, style: .continuous)
                 .fill(isOn ? Color.accentColor : Theme.subtleFill))
-            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .overlay(RoundedRectangle(cornerRadius: inline ? 11 : 14, style: .continuous)
                 .strokeBorder(isOn ? Color.clear : Theme.hairline))
             .opacity(disabled ? 0.5 : 1)
-            .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: inline ? 11 : 14, style: .continuous))
         }
         .buttonStyle(.plain)
         .disabled(disabled)
@@ -318,7 +351,7 @@ struct ContentView: View {
     @EnvironmentObject var t: SystemToggles
     let onQuit: () -> Void
 
-    private let five = Array(repeating: GridItem(.flexible(), spacing: 6), count: 5)
+    private let five = Array(repeating: GridItem(.flexible(), spacing: 6), count: 3)   // menu bar toggles are slim pills, three per row
     private let four = Array(repeating: GridItem(.flexible(), spacing: 6), count: 4)
 
     var body: some View {
@@ -327,20 +360,25 @@ struct ContentView: View {
 
     private var mainStack: some View {
         VStack(alignment: .leading, spacing: 10) {
+            networkSection
+            batterySection
             graph("CPU", value: m.cpu, temp: m.cpuTemp, history: m.cpuHistory, color: .blue)
             coreBars
             graph("GPU · \(m.gpuCoreCount) cores", value: m.gpu, temp: m.gpuTemp, history: m.gpuHistory, color: .green)
                 .help(String(format: "Render %.0f%%  Tiler %.0f%%", m.gpuRenderer, m.gpuTiler))
             fansSection
             fanControlRow
+            memorySection
+            diskSection
 
             section("Menu bar") {
                 LazyVGrid(columns: five, spacing: 6) {
-                    Tile(icon: "cpu", title: "CPU", subtitle: "", isOn: m.showCPU) { m.showCPU.toggle() }
-                    Tile(icon: "square.stack.3d.up", title: "GPU", subtitle: "", isOn: m.showGPU) { m.showGPU.toggle() }
-                    Tile(icon: "fan", title: "Fan", subtitle: "", isOn: m.showFan) { m.showFan.toggle() }
-                    Tile(icon: "thermometer.medium", title: "CPU °C", subtitle: "", isOn: m.showCPUTemp) { m.showCPUTemp.toggle() }
-                    Tile(icon: "thermometer.high", title: "GPU °C", subtitle: "", isOn: m.showGPUTemp) { m.showGPUTemp.toggle() }
+                    Tile(icon: "cpu", title: "CPU", subtitle: "", isOn: m.showCPU, inline: true) { m.showCPU.toggle() }
+                    Tile(icon: "square.stack.3d.up", title: "GPU", subtitle: "", isOn: m.showGPU, inline: true) { m.showGPU.toggle() }
+                    Tile(icon: "fan", title: "Fan", subtitle: "", isOn: m.showFan, inline: true) { m.showFan.toggle() }
+                    Tile(icon: "thermometer.medium", title: "CPU°", subtitle: "", isOn: m.showCPUTemp, inline: true) { m.showCPUTemp.toggle() }
+                    Tile(icon: "thermometer.high", title: "GPU°", subtitle: "", isOn: m.showGPUTemp, inline: true) { m.showGPUTemp.toggle() }
+                    Tile(icon: "internaldrive", title: "Disk", subtitle: "", isOn: m.showDisk, inline: true) { m.showDisk.toggle() }
                 }
             }
 
@@ -356,9 +394,9 @@ struct ContentView: View {
                     .help("Screen cleaning: blacks out the screen for up to 2 minutes (Esc exits)")
                     Tile(icon: "sun.max", title: "Stay on", isOn: p.keepScreenOn) { p.setKeepScreenOn(!p.keepScreenOn) }
                         .help("Stay on: keeps the display from sleeping")
-                    Tile(icon: "laptopcomputer", title: "Lid", subtitle: p.busy ? "Password…" : (p.lidAwake ? "Awake" : "Sleeps"),
+                    Tile(icon: "laptopcomputer", title: "Lid", subtitle: p.busy ? "Wait…" : (p.lidAwake ? "Awake" : "Sleeps"),
                          isOn: p.lidAwake, disabled: p.busy) { p.setLidAwake(!p.lidAwake) }
-                        .help("Lid: keeps the Mac awake with the lid closed (asks for your admin password)")
+                        .help("Lid: keeps the Mac awake with the lid closed (uses the background helper; one admin password the first time)")
                     if l.available {
                         Tile(icon: "applelogo", title: "Logo", subtitle: l.isOn ? "Lit" : "Off", isOn: l.isOn) { l.setOn(!l.isOn) }
                             .help("The glowing Apple logo on the lid. Modes and brightness are below.")
@@ -434,6 +472,117 @@ struct ContentView: View {
                 Spacer()
             }
         }
+    }
+
+    private static let gib = 1_073_741_824.0   // Activity Monitor counts memory in GiB
+
+    /// One full-width bar with the icon and value written inside it, so both rows are the same length
+    /// and no space is wasted beside the bar. The fill is translucent so the text reads on top of it.
+    private func barRow(icon: String, fraction: Double, color: Color, leading: Text? = nil, value: Text) -> some View {
+        HStack(spacing: 7) {
+            Image(systemName: icon).font(.caption).foregroundStyle(.secondary)
+            leading?.lineLimit(1).minimumScaleFactor(0.8)
+            Spacer(minLength: 0)
+            value.lineLimit(1).minimumScaleFactor(0.8)
+        }
+        .padding(.horizontal, 9)
+        .frame(maxWidth: .infinity)
+        .frame(height: 22)
+        .background(alignment: .leading) {
+            GeometryReader { geo in
+                Rectangle().fill(color.opacity(0.45)).frame(width: geo.size.width * min(max(fraction, 0), 1))
+            }
+        }
+        .background(Theme.subtleFill)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Theme.hairline))
+    }
+
+    /// Startup volume: bar = space used (orange above 90%), value = space remaining. Read/write speed in the tooltip.
+    @ViewBuilder private var diskSection: some View {
+        if m.diskTotal > 0 {
+            let used = Double(m.diskTotal - m.diskFree) / Double(m.diskTotal)
+            barRow(icon: "internaldrive", fraction: used,
+                   color: used > 0.9 ? .orange : .blue,
+                   value: Text(String(format: "%.0f / %.0f GB free", Double(m.diskFree) / 1e9, Double(m.diskTotal) / 1e9)).font(.callout).monospacedDigit())
+                .help(String(format: "%.0f GB free of %.0f GB. ", Double(m.diskFree) / 1e9, Double(m.diskTotal) / 1e9)
+                      + "Reading " + Monitor.rate(m.diskRead) + ", writing " + Monitor.rate(m.diskWrite) + ".")
+        }
+    }
+
+    /// Memory: bar = memory in use, coloured by the kernel's pressure level (green, yellow, red).
+    @ViewBuilder private var memorySection: some View {
+        if m.memTotal > 0 {
+            let (label, color): (String, Color) = m.memPressure >= 4 ? ("Critical", .red) : m.memPressure >= 2 ? ("Warning", .yellow) : ("Normal", .green)
+            let swapping = m.swapUsed >= 50_000_000   // only when macOS is actually swapping
+            barRow(icon: "memorychip", fraction: Double(m.memUsed) / Double(m.memTotal), color: color,
+                   value: Text(String(format: "%.1f / %.0f GB", Double(m.memUsed) / Self.gib, Double(m.memTotal) / Self.gib))
+                            .font(.callout).monospacedDigit()
+                        + Text(swapping ? String(format: " +%.1f swap", Double(m.swapUsed) / Self.gib) : "")
+                            .font(.caption).foregroundStyle(.secondary))
+            .help(String(format: "Memory pressure: %@. Swap used: %.1f GB.", label, Double(m.swapUsed) / Self.gib))
+        }
+    }
+
+    /// Network speed on the left, whole-Mac power draw on the right.
+    @ViewBuilder private var networkSection: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "arrow.up.arrow.down").font(.caption).foregroundStyle(.secondary)
+            Text(Image(systemName: "arrow.down")).font(.caption).foregroundStyle(.secondary)
+                + Text(" " + Monitor.rate(m.netDown)).font(.callout).monospacedDigit()
+            Text(Image(systemName: "arrow.up")).font(.caption).foregroundStyle(.secondary)
+                + Text(" " + Monitor.rate(m.netUp)).font(.callout).monospacedDigit()
+            Spacer(minLength: 0)
+            if let w = m.systemPower {
+                Text(Image(systemName: "bolt.fill")).font(.caption).foregroundStyle(.secondary)
+                    + Text(String(format: " %.1f W", w)).font(.callout).monospacedDigit()
+            }
+        }
+        .lineLimit(1)
+        .help(m.systemPower.map { _ in
+            "Power the whole Mac is drawing right now" + (m.adapterPower.map { String(format: ". Charger input: %.1f W", $0) } ?? ". Running on battery.")
+        } ?? "Network speed")
+    }
+
+    /// Battery as a bar like RAM and Storage: the fill is the charge level (orange at 20% or less, red at 10% or less),
+    /// "Health · cycles" sit at the left inside it, and the charge status at the right.
+    @ViewBuilder private var batterySection: some View {
+        if m.batteryHealth != nil || m.cycleCount != nil || m.batteryPercent != nil {
+            let pct = Double(m.batteryPercent ?? 0)
+            let color: Color = pct <= 10 ? .red : pct <= 20 ? .orange : .green
+            barRow(icon: m.batteryCharging ? "battery.100percent.bolt" : "battery.100", fraction: pct / 100, color: color,
+                   leading: Text(batteryInfo).font(.caption).foregroundStyle(Color.primary.opacity(0.75)),
+                   value: Text(chargeStatus ?? "").font(.callout).monospacedDigit())
+                .help(chargeTooltip)
+        }
+    }
+
+    /// "Health 100%  ·  3 cycles"
+    private var batteryInfo: String {
+        var info: [String] = []
+        if let h = m.batteryHealth { info.append(String(format: "Health %.0f%%", h)) }
+        if let c = m.cycleCount { info.append("\(c) cycles") }
+        return info.joined(separator: "  ·  ")
+    }
+
+    /// "62%  ·  1h 12m to full", "100%  ·  Plugged in", "40%  ·  3h 5m left".
+    private var chargeStatus: String? {
+        guard let pct = m.batteryPercent else { return nil }
+        func hm(_ min: Int) -> String { min >= 60 ? "\(min / 60)h \(min % 60)m" : "\(min)m" }
+        let detail: String
+        if m.batteryCharging { detail = m.batteryMinutes.map { hm($0) + " to full" } ?? "Charging" }
+        else if m.batteryPlugged { detail = pct >= 100 ? "Plugged in" : "Not charging" }
+        else { detail = m.batteryMinutes.map { hm($0) + " left" } ?? "On battery" }
+        return "\(pct)%  ·  \(detail)"
+    }
+
+    private var chargeTooltip: String {
+        var parts = ["Health: full-charge capacity compared with the battery's design capacity."]
+        if m.batteryPlugged {
+            parts.append(m.chargerWatts.map { "Charger: \($0) W." } ?? "Charger connected.")
+            if let w = m.adapterPower { parts.append(String(format: "Input now: %.1f W.", w)) }
+        } else { parts.append("Running on battery.") }
+        return parts.joined(separator: " ")
     }
 
     /// Auto / manual switch for the fans, with a speed slider when manual and a one-tap Max.
@@ -674,9 +823,9 @@ final class GraphNSView: NSView {
         let pts = values.suffix(capacity + 2)
         guard pts.count >= 2 else { content.contents = nil; return }
         let n = pts.count
-        // Positions at the start of a sample interval (frac = 0); the animation then slides them left.
+        // The newest sample sits at the right edge; the graph steps left by one sample each second (no scrolling animation).
         let points: [CGPoint] = pts.enumerated().map { i, v in
-            CGPoint(x: w + (1 - CGFloat(n - 1 - i)) * dx, y: h * CGFloat(min(max(v, 0), 100) / 100))
+            CGPoint(x: w - CGFloat(n - 1 - i) * dx, y: h * CGFloat(min(max(v, 0), 100) / 100))
         }
         // Smooth curve through segment midpoints: rounded, and never overshoots the data range.
         let line = CGMutablePath()
@@ -693,19 +842,6 @@ final class GraphNSView: NSView {
         area.closeSubpath()
 
         content.contents = renderImage(line: line, area: area, size: content.bounds.size, pad: pad, scale: scale)
-
-        // Slide left by one sample width over one sample interval, starting at the right phase.
-        let interval = Monitor.sampleInterval
-        let elapsed = min(max(Date().timeIntervalSince(lastSample), 0), interval)
-        let anim = CABasicAnimation(keyPath: "transform.translation.x")
-        anim.fromValue = 0
-        anim.toValue = -dx
-        anim.duration = interval
-        anim.timingFunction = CAMediaTimingFunction(name: .linear)
-        anim.beginTime = scroll.convertTime(CACurrentMediaTime(), from: nil) - elapsed
-        anim.fillMode = .forwards          // hold at the end if the next sample is a little late
-        anim.isRemovedOnCompletion = false
-        scroll.add(anim, forKey: "scroll")
     }
 
     /// Draws the gradient fill and the line into one bitmap (CPU), covering the plot plus `pad` on each side.

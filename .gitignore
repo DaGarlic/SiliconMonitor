@@ -6,6 +6,9 @@
 # The bundled app is produced by ./bundle.sh
 SiliconMonitor.app/
 
+# Disk images produced by tools/make_dmg.sh
+*.dmg
+
 # macOS
 .DS_Store
 

@@ -2,6 +2,7 @@
 # Builds a release binary and wraps it in SiliconMonitor.app (menu bar only, no Dock icon).
 set -e
 cd "$(dirname "$0")"
+VERSION="${VERSION:-1.0}"   # shown in Finder's Get Info; override with VERSION=1.1 ./bundle.sh
 swift build -c release
 APP=SiliconMonitor.app
 rm -rf "$APP"
@@ -9,7 +10,7 @@ mkdir -p "$APP/Contents/MacOS"
 cp .build/release/SiliconMonitor "$APP/Contents/MacOS/"
 mkdir -p "$APP/Contents/Resources"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/"
-cat > "$APP/Contents/Info.plist" <<'EOF'
+cat > "$APP/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -18,7 +19,8 @@ cat > "$APP/Contents/Info.plist" <<'EOF'
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundleExecutable</key><string>SiliconMonitor</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleVersion</key><string>${VERSION}</string>
+  <key>CFBundleShortVersionString</key><string>${VERSION}</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>LSUIElement</key><true/>
 </dict></plist>

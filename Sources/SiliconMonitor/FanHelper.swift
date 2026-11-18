@@ -8,6 +8,7 @@ import CSMC
 // (checked with the peer's real uid, not just file permissions). Commands, one per line:
 //   SET <0-100>  manual mode, target = min + percent * (max - min) for each fan
 //   AUTO         hand the fans back to macOS
+//   LID <0|1>    pmset disablesleep 0/1 (stay awake with the lid closed); reverted when that client goes away
 //   PING         heartbeat
 // It greets each client with "HELLO <version>" so the app can tell when the installed copy is out of date.
 //
@@ -16,13 +17,25 @@ import CSMC
 // process is stopped, or the chip reaches 95 C (manual control is then refused until it cools to 85 C).
 
 /// Bump when the protocol changes; the app reinstalls the helper if the versions differ.
-let fanHelperVersion = 2
+let fanHelperVersion = 3
 
 nonisolated(unsafe) private var helperSocketPath = ""
 nonisolated(unsafe) private var thermalBlocked = false   // set after a thermal revert; cleared once cooled
 
+nonisolated(unsafe) private var lidHeld = 0   // clients currently holding "stay awake with the lid closed"
+
+private func setLidSleepDisabled(_ on: Bool) {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/usr/bin/pmset")
+    p.arguments = ["-a", "disablesleep", on ? "1" : "0"]
+    p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
+    try? p.run()
+    p.waitUntilExit()
+}
+
 private func helperShutdown() -> Never {
     restoreAutomaticFans()
+    if lidHeld > 0 { setLidSleepDisabled(false) }
     unlink(helperSocketPath)
     exit(0)
 }
@@ -66,6 +79,7 @@ private func serve(client: Int32, tempKeys: [String]) {
 
     let tooHot = 95.0, cooledTo = 85.0
     var manualOn = false
+    var lidOn = false
     var lastBeat = Date()
     var pending = ""
     var buf = [UInt8](repeating: 0, count: 256)
@@ -79,6 +93,10 @@ private func serve(client: Int32, tempKeys: [String]) {
             manualOn = true
         case "AUTO":
             restoreAutomaticFans(); manualOn = false
+        case "LID":
+            let want = parts.dropFirst().first == "1"
+            if want { if !lidOn { lidOn = true; lidHeld += 1 }; setLidSleepDisabled(true) }
+            else { if lidOn { lidOn = false; lidHeld -= 1 }; setLidSleepDisabled(false) }
         default:
             break   // PING and anything unknown just count as a heartbeat
         }
@@ -107,6 +125,7 @@ private func serve(client: Int32, tempKeys: [String]) {
             thermalBlocked = false
         }
     }
+    if lidOn { lidHeld -= 1; if lidHeld == 0 { setLidSleepDisabled(false) } }   // the app went away: let the Mac sleep again
     if manualOn { restoreAutomaticFans() }   // whatever ended a manual session, the fans go back to macOS
 }
 

@@ -44,12 +44,39 @@ final class Monitor: ObservableObject {
     @Published var gpuTemp: Double?
     @Published var fans: [Fan] = []
     @Published var smcAvailable = false
+    // Disk: boot volume capacity, and read/write throughput (bytes per second) since the previous sample.
+    @Published var diskRead = 0.0
+    @Published var diskWrite = 0.0
+    @Published var diskTotal: Int64 = 0
+    @Published var diskFree: Int64 = 0
+    // Battery: health is the current full-charge capacity relative to the design capacity (like System Settings).
+    @Published var batteryHealth: Double?
+    @Published var cycleCount: Int?
+    @Published var batteryPercent: Int?
+    @Published var batteryPlugged = false       // a charger is connected
+    @Published var batteryCharging = false
+    @Published var batteryMinutes: Int?         // to full while charging, to empty on battery (nil when macOS doesn't know yet)
+    @Published var chargerWatts: Int?           // the connected charger's rating
+    // Memory: used = app + wired + compressed (as Activity Monitor counts it); pressure is the kernel's 1/2/4 level.
+    @Published var memUsed: UInt64 = 0
+    @Published var memTotal: UInt64 = 0
+    @Published var swapUsed: UInt64 = 0
+    @Published var memPressure = 1
+    // Network (all Wi-Fi / Ethernet / cellular-style interfaces, bytes per second) and whole-Mac power draw.
+    @Published var netDown = 0.0
+    @Published var netUp = 0.0
+    @Published var systemPower: Double?     // watts, SMC key PSTR (everything the Mac is drawing right now)
+    @Published var adapterPower: Double?    // watts coming in from the charger, SMC key PDTR
+    private var prevNet: (counters: [String: (rx: UInt32, tx: UInt32)], time: Date)?
+    private var prevDisk: (read: UInt64, write: UInt64, time: Date)?
+    private var lastCapacityCheck = Date.distantPast
+    private var lastBatteryCheck = Date.distantPast
 
     private var timer: Timer?
     @Published var coreLoads: [Double] = []
     // Rolling 1-minute history, one sample per refresh tick (every `sampleInterval` seconds).
     static let sampleInterval: TimeInterval = 1
-    static let maxHistory = 60 / Int(sampleInterval)
+    static let maxHistory = Int(60 / sampleInterval)
     /// Called once at the end of every refresh (so observers don't react to each individual value).
     var onRefresh: (() -> Void)?
     @Published var lastSample = Date()   // when the newest history sample was taken (drives smooth scrolling)
@@ -73,6 +100,7 @@ final class Monitor: ObservableObject {
     @Published var showCPUTemp: Bool { didSet { UserDefaults.standard.set(showCPUTemp, forKey: "showCPUTemp") } }
     @Published var showGPUTemp: Bool { didSet { UserDefaults.standard.set(showGPUTemp, forKey: "showGPUTemp") } }
     @Published var showFan: Bool { didSet { UserDefaults.standard.set(showFan, forKey: "showFan") } }
+    @Published var showDisk: Bool { didSet { UserDefaults.standard.set(showDisk, forKey: "showDisk") } }
 
     // Left-pads with spaces; the menu bar image uses a monospaced font, so every character is the same width.
     private func pad(_ v: Double?, width: Int) -> String {
@@ -80,15 +108,28 @@ final class Monitor: ObservableObject {
         return String(repeating: " ", count: max(0, width - s.count)) + s
     }
 
-    var menuTitle: String {
-        var parts: [String] = []
-        if showCPU { parts.append("CPU \(pad(cpu, width: 3))%") }
-        if showGPU { parts.append("GPU \(pad(gpu, width: 3))%") }
-        if showCPUTemp { parts.append("CPU \(pad(cpuTemp, width: 3))°") }
-        if showGPUTemp { parts.append("GPU \(pad(gpuTemp, width: 3))°") }
-        if showFan { parts.append("\(pad(fans.first?.rpm, width: 4)) rpm") }
-        return parts.joined(separator: "  ")   // empty when nothing is selected
+    /// One stacked readout in the menu bar: a tiny label over the value. `sample` is the widest value it can show,
+    /// so every cell keeps a fixed width and the menu bar never jitters.
+    struct MenuCell: Equatable {
+        let label: String
+        let value: String
+        let sample: String
     }
+
+    var menuCells: [MenuCell] {
+        func num(_ v: Double?) -> String { v.map { String(format: "%.0f", $0) } ?? "–" }
+        var cells: [MenuCell] = []
+        if showCPU { cells.append(MenuCell(label: "CPU", value: num(cpu) + "%", sample: "100%")) }
+        if showGPU { cells.append(MenuCell(label: "GPU", value: num(gpu) + "%", sample: "100%")) }
+        if showCPUTemp { cells.append(MenuCell(label: "CPU°", value: num(cpuTemp) + "°", sample: "100°")) }
+        if showGPUTemp { cells.append(MenuCell(label: "GPU°", value: num(gpuTemp) + "°", sample: "100°")) }
+        if showFan { cells.append(MenuCell(label: "FAN", value: num(fans.first?.rpm), sample: "9999")) }
+        if showDisk { cells.append(MenuCell(label: "DISK", value: num(Double(diskFree) / 1e9) + "G", sample: "999G")) }
+        return cells
+    }
+
+    /// Plain-text form of the readout (used to notice when it changed).
+    var menuTitle: String { menuCells.map { "\($0.label) \($0.value)" }.joined(separator: "  ") }
 
     init() {
         let d = UserDefaults.standard
@@ -98,6 +139,7 @@ final class Monitor: ObservableObject {
         showCPUTemp = flag("showCPUTemp", false)
         showGPUTemp = flag("showGPUTemp", false)
         showFan = flag("showFan", true)
+        showDisk = flag("showDisk", false)
         smcAvailable = smc_open() == 0
         if smcAvailable { discoverKeys() }
         refresh()
@@ -129,6 +171,10 @@ final class Monitor: ObservableObject {
         coreLoads = c.cores
         let g = Self.gpuLoad()
         gpu = g.device; gpuRenderer = g.renderer; gpuTiler = g.tiler
+        updateDisk()
+        updateMemory()
+        updateNetwork()
+        if Date().timeIntervalSince(lastBatteryCheck) > 10 { lastBatteryCheck = Date(); updateBattery() }
         if record {
             lastSample = Date()
             cpuHistory.append(cpu); gpuHistory.append(gpu)
@@ -138,6 +184,8 @@ final class Monitor: ObservableObject {
         guard smcAvailable else { return }
         cpuTemp = cpuTempKeys.compactMap(readSMC).filter { $0 > 5 && $0 < 130 }.max()
         gpuTemp = gpuTempKeys.compactMap(readSMC).filter { $0 > 5 && $0 < 130 }.max()
+        systemPower = readSMC("PSTR").flatMap { $0 >= 0 && $0 < 500 ? $0 : nil }
+        adapterPower = readSMC("PDTR").flatMap { $0 > 0.5 && $0 < 500 ? $0 : nil }
         let n = Int(readSMC("FNum") ?? 0)
         fans = (0..<n).map { i in
             Fan(id: i,
@@ -145,6 +193,130 @@ final class Monitor: ObservableObject {
                 min: readSMC("F\(i)Mn") ?? 0,
                 max: readSMC("F\(i)Mx") ?? 0)
         }
+    }
+
+    /// Read/write rates from the storage drivers' cumulative byte counters; free space is re-read every 30 s.
+    private func updateDisk() {
+        let now = Date()
+        let t = Self.diskCounters()
+        if let p = prevDisk, now.timeIntervalSince(p.time) > 0.1 {
+            let dt = now.timeIntervalSince(p.time)
+            diskRead = Double(t.read &- p.read) / dt
+            diskWrite = Double(t.write &- p.write) / dt
+        }
+        prevDisk = (t.read, t.write, now)
+        if now.timeIntervalSince(lastCapacityCheck) > 30 {
+            lastCapacityCheck = now
+            let keys: Set<URLResourceKey> = [.volumeTotalCapacityKey, .volumeAvailableCapacityForImportantUsageKey]
+            if let v = try? URL(fileURLWithPath: "/").resourceValues(forKeys: keys) {
+                diskTotal = Int64(v.volumeTotalCapacity ?? 0)
+                diskFree = v.volumeAvailableCapacityForImportantUsage ?? 0
+            }
+        }
+    }
+
+    private func updateMemory() {
+        var stats = vm_statistics64_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64_data_t>.stride / MemoryLayout<integer_t>.stride)
+        let ok = withUnsafeMutablePointer(to: &stats) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                host_statistics64(mach_host_self(), HOST_VM_INFO64, $0, &count)
+            }
+        }
+        if ok == KERN_SUCCESS {
+            let page = UInt64(vm_kernel_page_size)
+            let pages = UInt64(stats.internal_page_count &- stats.purgeable_count) + UInt64(stats.wire_count) + UInt64(stats.compressor_page_count)
+            memUsed = pages * page
+        }
+        var total: UInt64 = 0; var size = MemoryLayout<UInt64>.size
+        if sysctlbyname("hw.memsize", &total, &size, nil, 0) == 0 { memTotal = total }
+        var swap = xsw_usage(); var ssize = MemoryLayout<xsw_usage>.size
+        if sysctlbyname("vm.swapusage", &swap, &ssize, nil, 0) == 0 { swapUsed = swap.xsu_used }
+        memPressure = Self.sysctlInt("kern.memorystatus_vm_pressure_level") ?? 1
+    }
+
+    /// Download and upload speed from the interface byte counters. The counters are 32-bit, so each interface's delta
+    /// is taken with wrapping subtraction (fine at one sample a second). Only physical interfaces (en*, pdp_ip*) count,
+    /// so VPN tunnels and loopback don't double-count the same traffic.
+    private func updateNetwork() {
+        let now = Date()
+        let c = Self.netCounters()
+        if let p = prevNet, now.timeIntervalSince(p.time) > 0.1 {
+            let dt = now.timeIntervalSince(p.time)
+            var rx = 0.0, tx = 0.0
+            for (name, cur) in c {
+                guard let old = p.counters[name] else { continue }
+                rx += Double(cur.rx &- old.rx); tx += Double(cur.tx &- old.tx)
+            }
+            netDown = rx / dt; netUp = tx / dt
+        }
+        prevNet = (c, now)
+    }
+
+    static func netCounters() -> [String: (rx: UInt32, tx: UInt32)] {
+        var result: [String: (rx: UInt32, tx: UInt32)] = [:]
+        var head: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&head) == 0, let first = head else { return [:] }
+        defer { freeifaddrs(head) }
+        var cursor: UnsafeMutablePointer<ifaddrs>? = first
+        while let cur = cursor {
+            let ifa = cur.pointee
+            let name = String(cString: ifa.ifa_name)
+            if let addr = ifa.ifa_addr, addr.pointee.sa_family == UInt8(AF_LINK),
+               name.hasPrefix("en") || name.hasPrefix("pdp_ip"), let data = ifa.ifa_data {
+                let d = data.assumingMemoryBound(to: if_data.self).pointee
+                result[name] = (d.ifi_ibytes, d.ifi_obytes)
+            }
+            cursor = ifa.ifa_next
+        }
+        return result
+    }
+
+    private func updateBattery() {
+        let svc = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSmartBattery"))
+        guard svc != 0 else { batteryHealth = nil; cycleCount = nil; return }
+        defer { IOObjectRelease(svc) }
+        func prop(_ k: String) -> Any? { IORegistryEntryCreateCFProperty(svc, k as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue() }
+        let data = prop("BatteryData") as? [String: Any] ?? [:]
+        func num(_ k: String) -> Double? { ((data[k] ?? prop(k)) as? NSNumber)?.doubleValue }
+        cycleCount = (prop("CycleCount") as? NSNumber)?.intValue
+        batteryPercent = (prop("CurrentCapacity") as? NSNumber)?.intValue
+        batteryPlugged = (prop("ExternalConnected") as? NSNumber)?.boolValue ?? false
+        batteryCharging = (prop("IsCharging") as? NSNumber)?.boolValue ?? false
+        func minutes(_ k: String) -> Int? { (prop(k) as? NSNumber).map(\.intValue).flatMap { $0 > 0 && $0 < 6000 ? $0 : nil } }
+        batteryMinutes = batteryCharging ? minutes("AvgTimeToFull") : (batteryPlugged ? nil : minutes("AvgTimeToEmpty") ?? minutes("TimeRemaining"))
+        chargerWatts = ((prop("AdapterDetails") as? [String: Any])?["Watts"] as? NSNumber).map(\.intValue)
+        if let design = num("DesignCapacity"), design > 0, let full = num("NominalChargeCapacity") ?? num("AppleRawMaxCapacity") {
+            batteryHealth = min(full / design * 100, 100)
+        } else { batteryHealth = nil }
+    }
+
+    /// Total bytes read and written since boot, summed over every block storage driver.
+    static func diskCounters() -> (read: UInt64, write: UInt64) {
+        var it: io_iterator_t = 0
+        guard IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOBlockStorageDriver"), &it) == KERN_SUCCESS else { return (0, 0) }
+        defer { IOObjectRelease(it) }
+        var r: UInt64 = 0, w: UInt64 = 0
+        var s = IOIteratorNext(it)
+        while s != 0 {
+            if let stats = IORegistryEntryCreateCFProperty(s, "Statistics" as CFString, kCFAllocatorDefault, 0)?
+                .takeRetainedValue() as? [String: Any] {
+                r &+= (stats["Bytes (Read)"] as? NSNumber)?.uint64Value ?? 0
+                w &+= (stats["Bytes (Write)"] as? NSNumber)?.uint64Value ?? 0
+            }
+            IOObjectRelease(s)
+            s = IOIteratorNext(it)
+        }
+        return (r, w)
+    }
+
+    /// "12.3 MB/s" style rate; `width` left-pads for the fixed-width menu bar text.
+    static func rate(_ bytesPerSecond: Double, width: Int = 0) -> String {
+        let mb = bytesPerSecond / 1_000_000
+        let s = mb >= 100 ? String(format: "%.0f MB/s", mb)
+              : mb >= 1 ? String(format: "%.1f MB/s", mb)
+              : String(format: "%.0f KB/s", bytesPerSecond / 1000)
+        return String(repeating: " ", count: max(0, width - s.count)) + s
     }
 
     // Load of each core (and overall) since the previous sample.
