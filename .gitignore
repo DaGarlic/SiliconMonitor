@@ -1,0 +1,16 @@
+# Swift Package Manager build output
+.build
+.build.nosync
+.swiftpm/
+
+# The bundled app is produced by ./bundle.sh
+SiliconMonitor.app/
+
+# macOS
+.DS_Store
+
+# Editors
+.idea/
+.vscode/
+*.xcworkspace
+xcuserdata/

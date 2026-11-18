@@ -1,0 +1,146 @@
+import Foundation
+import CSMC
+
+// The root half of fan control: a small launchd daemon, installed once (see FanController.installHelper).
+//   /Library/PrivilegedHelperTools/local.siliconmonitor.fanhelper --fan-helper <socket path> <allowed uid>
+//
+// It listens on a Unix socket and serves one client at a time, but only the user it was installed for
+// (checked with the peer's real uid, not just file permissions). Commands, one per line:
+//   SET <0-100>  manual mode, target = min + percent * (max - min) for each fan
+//   AUTO         hand the fans back to macOS
+//   PING         heartbeat
+// It greets each client with "HELLO <version>" so the app can tell when the installed copy is out of date.
+//
+// Each client is served on its own thread.
+// Safety: the fans go back to automatic whenever the client that set them disconnects, goes silent for 10 s, the
+// process is stopped, or the chip reaches 95 C (manual control is then refused until it cools to 85 C).
+
+/// Bump when the protocol changes; the app reinstalls the helper if the versions differ.
+let fanHelperVersion = 2
+
+nonisolated(unsafe) private var helperSocketPath = ""
+nonisolated(unsafe) private var thermalBlocked = false   // set after a thermal revert; cleared once cooled
+
+private func helperShutdown() -> Never {
+    restoreAutomaticFans()
+    unlink(helperSocketPath)
+    exit(0)
+}
+
+private func applyFanPercent(_ percent: Double) {
+    let n = Int(readSMC("FNum") ?? 0)
+    for i in 0..<n {
+        let mn = readSMC("F\(i)Mn") ?? 2000
+        let mx = readSMC("F\(i)Mx") ?? 6000
+        let rpm = mn + min(max(percent, 0), 100) / 100 * (mx - mn)
+        _ = smcWriteU8("F\(i)md", 1)
+        _ = smcWriteFloat("F\(i)Tg", Float(rpm))
+    }
+}
+
+private func hottestTemperature(keys: [String]) -> Double {
+    keys.compactMap(readSMC).filter { $0 > 5 && $0 < 130 }.max() ?? 0
+}
+
+private func temperatureKeys() -> [String] {
+    var keys: [String] = []
+    let count = Int(readSMC("#KEY") ?? 0)
+    for i in 0..<count {
+        let k = smc_key_at(UInt32(i))
+        guard k != 0 else { continue }
+        let name = fourCCString(k)
+        if (name.hasPrefix("Tp") || name.hasPrefix("Tg")), let v = readSMC(name), v > 5, v < 130 { keys.append(name) }
+    }
+    return keys
+}
+
+/// Serves one connected client (on its own thread) until it disconnects, goes silent, or errors.
+private func serve(client: Int32, tempKeys: [String]) {
+    var tv = timeval(tv_sec: 2, tv_usec: 0)   // wake every 2 s for the heartbeat and thermal checks
+    setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+    var one: Int32 = 1
+    setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+
+    func reply(_ s: String) { let d = Array((s + "\n").utf8); _ = write(client, d, d.count) }
+    reply("HELLO \(fanHelperVersion)")
+
+    let tooHot = 95.0, cooledTo = 85.0
+    var manualOn = false
+    var lastBeat = Date()
+    var pending = ""
+    var buf = [UInt8](repeating: 0, count: 256)
+
+    func handle(_ line: String) {
+        let parts = line.split(separator: " ")
+        switch parts.first {
+        case "SET":
+            guard !thermalBlocked else { reply("AUTO thermal"); return }
+            applyFanPercent(Double(parts.dropFirst().first ?? "") ?? 0)
+            manualOn = true
+        case "AUTO":
+            restoreAutomaticFans(); manualOn = false
+        default:
+            break   // PING and anything unknown just count as a heartbeat
+        }
+    }
+
+    while true {
+        let n = read(client, &buf, buf.count)
+        if n == 0 { break }                                              // app closed the connection
+        if n < 0 {
+            if errno != EAGAIN && errno != EWOULDBLOCK { break }         // a real error; a timeout is fine
+        } else {
+            lastBeat = Date()
+            pending += String(decoding: buf.prefix(n), as: UTF8.self)
+            while let nl = pending.firstIndex(of: "\n") {
+                handle(String(pending[..<nl]))
+                pending.removeSubrange(...nl)
+            }
+        }
+        if Date().timeIntervalSince(lastBeat) > 10 { break }             // app went silent
+
+        let t = hottestTemperature(keys: tempKeys)
+        if manualOn && t >= tooHot {
+            restoreAutomaticFans(); manualOn = false; thermalBlocked = true
+            reply("AUTO thermal \(Int(t))")
+        } else if thermalBlocked && t < cooledTo {
+            thermalBlocked = false
+        }
+    }
+    if manualOn { restoreAutomaticFans() }   // whatever ended a manual session, the fans go back to macOS
+}
+
+func runFanHelper(socketPath: String, uid allowedUID: uid_t) -> Never {
+    helperSocketPath = socketPath
+    guard smc_open() == 0 else { exit(2) }
+    for sig in [SIGINT, SIGTERM, SIGHUP] { signal(sig) { _ in helperShutdown() } }
+    signal(SIGPIPE, SIG_IGN)
+    restoreAutomaticFans()   // start clean, in case a previous run died while in manual mode
+
+    unlink(socketPath)
+    let server = socket(AF_UNIX, SOCK_STREAM, 0)
+    guard server >= 0 else { exit(3) }
+    var addr = sockaddr_un()
+    addr.sun_family = sa_family_t(AF_UNIX)
+    withUnsafeMutableBytes(of: &addr.sun_path) { buf in
+        socketPath.withCString { _ = strncpy(buf.baseAddress!.assumingMemoryBound(to: CChar.self), $0, buf.count - 1) }
+    }
+    let len = socklen_t(MemoryLayout<sockaddr_un>.size)
+    addr.sun_len = UInt8(len)
+    let bound = withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(server, $0, len) } }
+    guard bound == 0 else { exit(4) }
+    chmod(socketPath, 0o666)   // anyone can connect; the peer's uid is checked below
+    listen(server, 4)
+
+    let tempKeys = temperatureKeys()
+    while true {
+        let client = accept(server, nil, nil)
+        if client < 0 { continue }
+        var euid: uid_t = 0, egid: gid_t = 0
+        guard getpeereid(client, &euid, &egid) == 0, euid == allowedUID else { close(client); continue }
+        Thread.detachNewThread {
+            serve(client: client, tempKeys: tempKeys)
+            close(client)
+        }
+    }
+}
