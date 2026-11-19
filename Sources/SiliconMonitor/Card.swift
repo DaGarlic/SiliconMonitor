@@ -9,6 +9,8 @@ enum CardStyle {
     static let cornerRadius: CGFloat = 22
     static let width: CGFloat = 330
     static let gap: CGFloat = 6   // space between the menu bar and the card
+    /// The tallest the card may be: the screen space under the menu bar. Set each time the card opens.
+    nonisolated(unsafe) static var maxHeight: CGFloat = 10_000
 }
 
 enum CardPlacement {

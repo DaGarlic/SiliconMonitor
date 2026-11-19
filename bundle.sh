@@ -2,7 +2,7 @@
 # Builds a release binary and wraps it in SiliconMonitor.app (menu bar only, no Dock icon).
 set -e
 cd "$(dirname "$0")"
-VERSION="${VERSION:-1.2}"   # shown in Finder's Get Info; override with VERSION=1.2 ./bundle.sh
+VERSION="${VERSION:-1.3}"   # shown in Finder's Get Info; override with VERSION=1.3 ./bundle.sh
 swift build -c release
 APP=SiliconMonitor.app
 rm -rf "$APP"
@@ -22,6 +22,7 @@ cat > "$APP/Contents/Info.plist" <<EOF
   <key>CFBundleVersion</key><string>${VERSION}</string>
   <key>CFBundleShortVersionString</key><string>${VERSION}</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
+  <key>NSAudioCaptureUsageDescription</key><string>SiliconMonitor listens to the audio your Mac plays so the Apple logo can flash to the beat. Nothing is recorded or stored.</string>
   <key>LSUIElement</key><true/>
 </dict></plist>
 EOF
@@ -30,12 +31,15 @@ EOF
 # For distribution: DEVELOPER_ID="Developer ID Application: Your Name (TEAMID)" ./bundle.sh
 # signs with the hardened runtime, which Apple's notarization requires.
 IDENTITY="SiliconMonitor Local Signing"
+# codesign refuses files carrying Finder info / resource forks, and a synced Desktop can re-add them between
+# commands, so strip them right before each attempt and retry.
+sign() { for i in 1 2 3 4 5; do xattr -cr "$APP"; codesign "$@" && return 0; sleep 1; done; return 1; }
 if [ -n "$DEVELOPER_ID" ]; then
-  codesign --force --options runtime --timestamp --sign "$DEVELOPER_ID" "$APP"
+  sign --force --options runtime --timestamp --sign "$DEVELOPER_ID" "$APP"
 elif security find-identity -p codesigning 2>/dev/null | grep -q "$IDENTITY"; then
-  codesign --force --sign "$IDENTITY" "$APP"
+  sign --force --sign "$IDENTITY" "$APP"
 else
   echo "Note: identity '$IDENTITY' not found; signing ad-hoc"
-  codesign --force --sign - "$APP"
+  sign --force --sign - "$APP"
 fi
 echo "Built $APP"

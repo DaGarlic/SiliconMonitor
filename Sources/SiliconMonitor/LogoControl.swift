@@ -147,6 +147,49 @@ private final class LogoDriver: @unchecked Sendable {
 
     // MARK: Effects
 
+    /// Flashes the logo on each beat from `mailbox`: a fast rise toward a peak (louder beat, brighter peak), then a
+    /// quick fall back to `floor`, where it is held until the next beat. Beats that arrive while a flash is still
+    /// playing are dropped, and so are ones that are already stale when the logo gets to them.
+    func music(floor: Double, mailbox: BeatMailbox, alive: () -> Bool) {
+        restore()
+        sleep(0.45, alive: alive)
+        func fall() {
+            let now = max(factor(), 0.01)
+            guard now > floor else { return }
+            setFade(0.2 / Self.timeFraction(toReach: (now - floor) / now))
+            setLit(false)
+            wait(timeout: 1, alive: alive) { $0 <= floor }
+            if alive() { turnRound(from: false) }     // hold at the floor until the next beat
+        }
+        fall()
+        var seen = mailbox.latest().id
+        var idle = false      // nothing is playing: logo back to normal brightness until sound returns
+        while alive() {
+            let silence = mailbox.secondsSinceSound()
+            if !idle, silence > 3 {
+                idle = true
+                restore()
+            } else if idle, silence < 0.3 {
+                idle = false
+                fall()
+                seen = mailbox.latest().id
+            }
+            if idle { Thread.sleep(forTimeInterval: 0.05); continue }
+            let beat = mailbox.latest()
+            guard beat.id != seen else { Thread.sleep(forTimeInterval: 0.004); continue }
+            seen = beat.id
+            guard beat.age < 0.12 else { continue }
+            let peak = 0.55 + 0.42 * beat.strength
+            let now = max(factor(), 0.01)
+            if heading == true { setFade(Self.holdDuration); setLit(false) }   // a write only starts a fade when the state changes
+            setFade(0.06 / Self.timeFraction(toReach: (peak - now) / max(1 - now, 0.01)))
+            setLit(true)
+            wait(timeout: 0.5, alive: alive) { $0 >= peak }
+            guard alive() else { return }
+            fall()
+        }
+    }
+
     /// Waits (polling the logo's level) until `reached` is true, `timeout` passes, or the job is superseded.
     private func wait(timeout: Double, alive: () -> Bool, until reached: (Double) -> Bool) {
         let started = Date()
@@ -211,7 +254,7 @@ private final class LogoDriver: @unchecked Sendable {
 @MainActor
 final class LogoControl: ObservableObject {
     enum Mode: String, CaseIterable, Identifiable {
-        case auto, breathe, pulse, heartbeat, dim
+        case auto, breathe, pulse, heartbeat, dim, music
         var id: String { rawValue }
         var title: String {
             switch self {
@@ -220,10 +263,13 @@ final class LogoControl: ObservableObject {
             case .pulse: return "Pulse"
             case .heartbeat: return "Beat"
             case .dim: return "Dim"
+            case .music: return "Music"
             }
         }
     }
 
+    /// Shown under the mode pills when Music mode could not start (e.g. audio capture permission was refused).
+    @Published private(set) var musicNote: String?
     @Published private(set) var available = false
     @Published private(set) var isOn = true
     @Published private(set) var mode: Mode = .auto
@@ -231,6 +277,7 @@ final class LogoControl: ObservableObject {
     @Published private(set) var dim: Double
 
     private var driver: LogoDriver?
+    private var musicTap: AnyObject?   // MusicTap (macOS 14.2+), only alive while Music mode is on
     private var pendingDim: Task<Void, Never>?
     private var observers: [NSObjectProtocol] = []
 
@@ -249,7 +296,7 @@ final class LogoControl: ObservableObject {
 
         let center = NSWorkspace.shared.notificationCenter
         observers.append(center.addObserver(forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.driver?.submit { _ in } }   // stop effects while the screen sleeps
+            MainActor.assumeIsolated { self?.driver?.submit { _ in }; self?.stopMusic() }   // stop effects while the screen sleeps
         })
         observers.append(center.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
@@ -268,6 +315,7 @@ final class LogoControl: ObservableObject {
     func setOn(_ on: Bool) {
         guard let d = driver else { return }
         pendingDim?.cancel()
+        if !on { stopMusic() }
         if on {
             d.submit { _ in d.writeMode(2) }
         } else {
@@ -279,6 +327,7 @@ final class LogoControl: ObservableObject {
 
     func setMode(_ new: Mode) {
         guard available, isOn else { return }
+        musicNote = nil
         mode = new
         apply(new)
     }
@@ -295,9 +344,42 @@ final class LogoControl: ObservableObject {
         }
     }
 
+    private func musicBlocked() {
+        musicNote = "Audio capture is blocked. Allow SiliconMonitor under System Settings › Privacy & Security › Screen & System Audio Recording, then pick Music again."
+        mode = .auto
+        apply(.auto)
+    }
+
+    private func stopMusic() {
+        if #available(macOS 14.2, *) { (musicTap as? MusicTap)?.stop() }
+        musicTap = nil
+    }
+
     private func apply(_ mode: Mode) {
         guard let d = driver else { return }
+        if mode != .music { stopMusic() }
         switch mode {
+        case .music:     // flashes on every beat of whatever the Mac is playing (needs macOS 14.2+ and audio capture permission)
+            guard #available(macOS 14.2, *) else { self.mode = .auto; apply(.auto); return }
+            let tap = (musicTap as? MusicTap) ?? MusicTap()
+            musicTap = tap
+            if MusicTap.permission == .denied { return musicBlocked() }
+            guard tap.start() else {
+                musicNote = "Couldn't listen to the Mac's audio."
+                self.mode = .auto; apply(.auto); return
+            }
+            let mailbox = tap.mailbox
+            if MusicTap.permission != .granted {   // the permission prompt is showing; check again once it is answered
+                Task { [weak self] in
+                    for _ in 0..<60 {
+                        try? await Task.sleep(nanoseconds: 1_000_000_000)
+                        guard let self, self.mode == .music else { return }
+                        if MusicTap.permission == .denied { return self.musicBlocked() }
+                        if MusicTap.permission == .granted { return }
+                    }
+                }
+            }
+            d.submit { alive in d.music(floor: 0.2, mailbox: mailbox, alive: alive) }
         case .auto:
             d.submit { _ in d.restore() }
         case .breathe:   // slow and soft, like the old MacBook sleep light: about 9 s a breath, floor 15%
@@ -328,11 +410,14 @@ final class LogoControl: ObservableObject {
     /// Quitting: hand the logo back to the system.
     func shutdown() {
         pendingDim?.cancel()
+        stopMusic()
         driver?.restoreAndWait()
         mode = .auto
     }
 
     // MARK: Debug
+
+    var debugLevel: Double { driver?.factor() ?? -1 }
 
     /// `SiliconMonitor --logo-selftest`: runs each mode briefly and prints the logo's level, then restores.
     func selfTest() {

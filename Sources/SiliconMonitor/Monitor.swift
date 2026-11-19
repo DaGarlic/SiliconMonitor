@@ -74,6 +74,11 @@ final class Monitor: ObservableObject {
     private var lastCapacityCheck = Date.distantPast
     private var lastBatteryCheck = Date.distantPast
 
+    let throttle = ThrottleMonitor()
+    /// The "Menu bar options" tiles at the bottom of the card are folded away until opened.
+    @Published var menuBarOptionsOpen = UserDefaults.standard.bool(forKey: "menuBarOptionsOpen") {
+        didSet { UserDefaults.standard.set(menuBarOptionsOpen, forKey: "menuBarOptionsOpen") }
+    }
     private var timer: Timer?
     @Published var coreLoads: [Double] = []
     // Rolling 1-minute history, one sample per refresh tick (every `sampleInterval` seconds).
@@ -84,6 +89,7 @@ final class Monitor: ObservableObject {
     @Published var lastSample = Date()   // when the newest history sample was taken (drives smooth scrolling)
     @Published var cpuHistory: [Double] = []
     @Published var gpuHistory: [Double] = []
+    @Published var powerHistory: [Double] = []   // watts the whole Mac draws, same 1-minute window
     @Published var gpuRenderer = 0.0
     @Published var gpuTiler = 0.0
     // Core tiers (e.g. 10 Performance + 5 Super). Cores are ordered lowest tier first.
@@ -188,6 +194,11 @@ final class Monitor: ObservableObject {
         gpuTemp = gpuTempKeys.compactMap(readSMC).filter { $0 > 5 && $0 < 130 }.max()
         systemPower = readSMC("PSTR").flatMap { $0 >= 0 && $0 < 500 ? $0 : nil }
         adapterPower = readSMC("PDTR").flatMap { $0 > 0.5 && $0 < 500 ? $0 : nil }
+        if record, let w = systemPower {
+            powerHistory.append(w)
+            if powerHistory.count > Self.maxHistory { powerHistory.removeFirst(powerHistory.count - Self.maxHistory) }
+        }
+        throttle.tick(cpuLoad: cpu, gpuLoad: gpu, cpuTemp: cpuTemp, gpuTemp: gpuTemp, power: systemPower)
         let n = Int(readSMC("FNum") ?? 0)
         fans = (0..<n).map { i in
             Fan(id: i,

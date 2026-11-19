@@ -28,6 +28,53 @@ enum Entry {
             SystemToggles().selfTest()
             exit(0)
         }
+        if CommandLine.arguments.contains("--layout-selftest") {   // debug: card height with and without a height cap
+            _ = NSApplication.shared
+            let monitor = Monitor()
+            monitor.refresh()
+            let view = ContentView(onQuit: {}).environmentObject(monitor).environmentObject(CleaningMode()).environmentObject(PowerMode())
+                .environmentObject(FanController()).environmentObject(LogoControl()).environmentObject(SystemToggles())
+                .environmentObject(UpdateChecker()).environmentObject(monitor.throttle)
+            for cap in [10_000.0, 500.0] {
+                CardStyle.maxHeight = cap
+                let host = NSHostingView(rootView: view)
+                host.layoutSubtreeIfNeeded()
+                print("cap \(Int(cap)): fitting height \(host.fittingSize.height)")
+            }
+            exit(0)
+        }
+        if CommandLine.arguments.contains("--throttle-selftest") {   // debug: prints what the throttle detector sees for 12 s
+            let t = ThrottleMonitor()
+            print("available: \(t.available)")
+            var r = ThrottleReading(); r.gpuLoad = 90
+            print("clean:", r.causes)
+            r.thermalLevel = 2; r.gpuCLTM = 0.4; print("hot:", r.causes)
+            r = ThrottleReading(); r.gpuLoad = 90; r.gpuReason = "GPU3_EMT"; r.gpuReasonShare = 0.2; r.gpuBudget = 0.5; r.gpuPowerCtl = 0.3
+            print("emergency + power:", r.causes)
+            r = ThrottleReading(); r.gpuLoad = 5; r.gpuBudget = 0.5; print("idle low budget:", r.causes)
+            for i in 0..<12 {
+                Thread.sleep(forTimeInterval: 1)
+                t.tick(cpuLoad: 0, gpuLoad: 0, cpuTemp: nil, gpuTemp: nil, power: nil)
+                let clocks = t.clocks.map { String(format: "%@ %.0f/%.0f MHz (%.0f%% active)", $0.name, $0.mhz, $0.maxMHz, $0.active * 100) }
+                print("\(i): thermal \(t.thermalLevel), budget \(Int(t.gpuBudget * 100))%, causes \(t.causes), \(clocks.joined(separator: "; "))")
+            }
+            exit(0)
+        }
+        if CommandLine.arguments.contains("--music-selftest") {   // debug: Music mode for 10 s, prints the logo's level range
+            let logo = LogoControl()
+            logo.setMode(.music)
+            var low = 9.0, high = -1.0, flashes = 0, wasHigh = false
+            for _ in 0..<1000 {
+                Thread.sleep(forTimeInterval: 0.01)
+                let f = logo.debugLevel
+                low = min(low, f); high = max(high, f)
+                if f > 0.5 && !wasHigh { flashes += 1 }
+                wasHigh = f > 0.5
+            }
+            print(String(format: "mode %@, level lowest %.2f highest %.2f, flashes above 50%%: %d", logo.mode.rawValue, low, high, flashes))
+            logo.shutdown()
+            exit(0)
+        }
         if CommandLine.arguments.contains("--logo-selftest") {   // debug: runs every logo mode and prints the level
             LogoControl().selfTest()
             exit(0)
@@ -88,7 +135,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .environmentObject(fanControl)
             .environmentObject(logo)
             .environmentObject(tools)
-            .environmentObject(updates))
+            .environmentObject(updates)
+            .environmentObject(monitor.throttle))
         let made = CardWindow.make(AnyView(EmptyView()))
         card = made.panel
         host = made.host
@@ -205,10 +253,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let anchor = statusItem.button?.window?.frame else { return }
         let screen = (NSScreen.screens.first { $0.frame.intersects(anchor) } ?? NSScreen.main)?.visibleFrame
             ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        CardStyle.maxHeight = max(anchor.minY - CardStyle.gap - screen.minY - 8, 300)   // the card scrolls beyond this
         monitor.refresh()
         logo.refresh()
         tools.refresh()
         host.rootView = cardContent
+        host.invalidateIntrinsicContentSize()   // the height cap may have changed (another screen)
         let frame = CardPlacement.frame(anchor: anchor, screen: screen,
                                         size: NSSize(width: CardStyle.width, height: fittingHeight))
         cardShown = true
@@ -275,23 +325,21 @@ enum Theme {
     static let hairline = Color.primary.opacity(0.10)
 }
 
-/// Gives its child its natural size, pinned to the top-left, but fills whatever space it is offered.
-/// While the card animates its height the window is briefly shorter or taller than the content; a plain frame
-/// would size the root view to the content and let the hosting view centre it (the content then drifts up and
-/// settles). This keeps the content fixed to the top edge. Asked for its ideal size (to size the window), it
-/// reports the content's natural height.
-struct TopPinned: Layout {
+/// Scrolls its child vertically and sizes itself to the child's natural height, but never taller than
+/// `CardStyle.maxHeight` (what fits on the screen under the menu bar); beyond that the content scrolls.
+/// While the card animates its height the window is briefly shorter or taller than the content; the scroll view
+/// fills whatever it is given and keeps the content pinned to the top, so nothing drifts.
+struct FitScroll: Layout {
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
         guard let child = subviews.first else { return .zero }
         let ideal = child.sizeThatFits(.unspecified)
-        return CGSize(width: ideal.width, height: proposal.height ?? ideal.height)
+        return CGSize(width: ideal.width, height: min(ideal.height, CardStyle.maxHeight))
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
         guard let child = subviews.first else { return }
-        let ideal = child.sizeThatFits(.unspecified)
         child.place(at: CGPoint(x: bounds.minX, y: bounds.minY), anchor: .topLeading,
-                    proposal: ProposedViewSize(width: ideal.width, height: ideal.height))
+                    proposal: ProposedViewSize(width: bounds.width, height: bounds.height))
     }
 }
 
@@ -353,13 +401,14 @@ struct ContentView: View {
     @EnvironmentObject var l: LogoControl
     @EnvironmentObject var t: SystemToggles
     @EnvironmentObject var u: UpdateChecker
+    @EnvironmentObject var th: ThrottleMonitor
     let onQuit: () -> Void
 
     private let five = Array(repeating: GridItem(.flexible(), spacing: 6), count: 3)   // menu bar toggles are slim pills, three per row
     private let four = Array(repeating: GridItem(.flexible(), spacing: 6), count: 4)
 
     var body: some View {
-        TopPinned { mainStack }
+        FitScroll { ScrollView(.vertical) { mainStack } }
     }
 
     private var mainStack: some View {
@@ -378,21 +427,12 @@ struct ContentView: View {
             coreBars
             graph("GPU · \(m.gpuCoreCount) cores", value: m.gpu, temp: m.gpuTemp, history: m.gpuHistory, color: .green)
                 .help(String(format: "Render %.0f%%  Tiler %.0f%%", m.gpuRenderer, m.gpuTiler))
+            powerSection
             fansSection
             fanControlRow
+            throttleSection
             memorySection
             diskSection
-
-            section("Menu bar") {
-                LazyVGrid(columns: five, spacing: 6) {
-                    Tile(icon: "cpu", title: "CPU", subtitle: "", isOn: m.showCPU, inline: true) { m.showCPU.toggle() }
-                    Tile(icon: "square.stack.3d.up", title: "GPU", subtitle: "", isOn: m.showGPU, inline: true) { m.showGPU.toggle() }
-                    Tile(icon: "fan", title: "Fan", subtitle: "", isOn: m.showFan, inline: true) { m.showFan.toggle() }
-                    Tile(icon: "thermometer.medium", title: "CPU°", subtitle: "", isOn: m.showCPUTemp, inline: true) { m.showCPUTemp.toggle() }
-                    Tile(icon: "thermometer.high", title: "GPU°", subtitle: "", isOn: m.showGPUTemp, inline: true) { m.showGPUTemp.toggle() }
-                    Tile(icon: "internaldrive", title: "Disk", subtitle: "", isOn: m.showDisk, inline: true) { m.showDisk.toggle() }
-                }
-            }
 
             section("Tools") {
                 LazyVGrid(columns: four, spacing: 6) {   // four per row; more tools wrap onto further rows
@@ -440,6 +480,33 @@ struct ContentView: View {
             }
             .animation(anim, value: [l.available && l.isOn, c.permissionMessage != nil, p.lidAwake, p.lastError != nil])
 
+            VStack(alignment: .leading, spacing: 8) {
+                Button(action: { m.menuBarOptionsOpen.toggle() }) {
+                    HStack(spacing: 4) {
+                        Text("MENU BAR OPTIONS").font(.system(size: 10.5, weight: .semibold)).tracking(0.4)
+                        Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold))
+                            .rotationEffect(.degrees(m.menuBarOptionsOpen ? 180 : 0))
+                        Spacer(minLength: 0)
+                    }
+                    .foregroundStyle(.secondary)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Choose what appears in the menu bar")
+                if m.menuBarOptionsOpen {
+                    LazyVGrid(columns: five, spacing: 6) {
+                        Tile(icon: "cpu", title: "CPU", subtitle: "", isOn: m.showCPU, inline: true) { m.showCPU.toggle() }
+                        Tile(icon: "square.stack.3d.up", title: "GPU", subtitle: "", isOn: m.showGPU, inline: true) { m.showGPU.toggle() }
+                        Tile(icon: "fan", title: "Fan", subtitle: "", isOn: m.showFan, inline: true) { m.showFan.toggle() }
+                        Tile(icon: "thermometer.medium", title: "CPU°", subtitle: "", isOn: m.showCPUTemp, inline: true) { m.showCPUTemp.toggle() }
+                        Tile(icon: "thermometer.high", title: "GPU°", subtitle: "", isOn: m.showGPUTemp, inline: true) { m.showGPUTemp.toggle() }
+                        Tile(icon: "internaldrive", title: "Disk", subtitle: "", isOn: m.showDisk, inline: true) { m.showDisk.toggle() }
+                    }
+                    .transition(appear)
+                }
+            }
+            .animation(anim, value: m.menuBarOptionsOpen)
+
             Button(action: onQuit) {
                 Text("Quit SiliconMonitor").font(.system(size: 12, weight: .medium))
                     .frame(maxWidth: .infinity).padding(.vertical, 7)
@@ -483,6 +550,70 @@ struct ContentView: View {
                 }
                 Spacer()
             }
+        }
+    }
+
+    // MARK: Throttle detector
+
+    /// "Super 4.6 · Performance 2.6 GHz": the busiest cluster of each core tier.
+    private var clockSummary: String {
+        var tiers: [(name: String, mhz: Double, active: Double)] = []
+        for (letter, name) in [("P", m.topTierName), ("M", m.lowTierName), ("E", m.lowTierName)] {
+            if let c = th.clocks.filter({ $0.name.hasPrefix(letter) }).max(by: { $0.active < $1.active }) {
+                tiers.append((name, c.mhz, c.active))
+            }
+        }
+        return tiers.map { String(format: "%@ %.1f", $0.name, $0.mhz / 1000) }.joined(separator: " · ") + (tiers.isEmpty ? "" : " GHz")
+    }
+
+    private func eventLine(_ e: ThrottleEvent, live: Bool) -> String {
+        let secs = Int((e.end ?? Date()).timeIntervalSince(e.start))
+        let length = secs >= 60 ? "\(secs / 60)m \(secs % 60)s" : "\(secs)s"
+        let time = e.start.formatted(date: .omitted, time: .shortened)
+        var line = "\(live ? "Now" : time) · \(length) · \(e.causes.joined(separator: ", "))"
+        let temps = [e.peakCPUTemp.map { String(format: "CPU %.0f°", $0) }, e.peakGPUTemp.map { String(format: "GPU %.0f°", $0) },
+                     e.peakPower.map { String(format: "%.0f W", $0) }].compactMap { $0 }.filter { !$0.hasPrefix("CPU 0") && !$0.hasPrefix("GPU 0") && $0 != "0 W" }
+        if !temps.isEmpty { line += " · peak " + temps.joined(separator: ", ") }
+        return line
+    }
+
+    /// Shows whether macOS is holding the chip back and why, plus a short history of when it happened.
+    @ViewBuilder private var throttleSection: some View {
+        if th.available {
+            VStack(alignment: .leading, spacing: 6) {
+                Button(action: { th.expanded.toggle() }) {
+                    HStack(spacing: 7) {
+                        Image(systemName: th.limited ? "exclamationmark.triangle.fill" : "gauge.with.dots.needle.67percent")
+                            .font(.caption).foregroundStyle(th.limited ? Color.orange : Color.secondary)
+                        Text(th.limited ? (th.causes.first ?? "Limited") + (th.causes.count > 1 ? " +\(th.causes.count - 1)" : "") : "Not throttled")
+                            .font(.callout).lineLimit(1).minimumScaleFactor(0.8)
+                        Spacer(minLength: 4)
+                        Text(clockSummary).font(.caption).foregroundStyle(.secondary).monospacedDigit().lineLimit(1).minimumScaleFactor(0.7)
+                        Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold)).foregroundStyle(.secondary)
+                            .rotationEffect(.degrees(th.expanded ? 180 : 0))
+                    }
+                    .padding(.horizontal, 9)
+                    .frame(maxWidth: .infinity, minHeight: 26)
+                    .background(th.limited ? Color.orange.opacity(0.18) : Theme.subtleFill)
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(th.limited ? Color.orange.opacity(0.5) : Theme.hairline))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Whether macOS is limiting performance because of heat or power, and the clock speed of each core tier. Click for recent events.")
+                if th.expanded {
+                    VStack(alignment: .leading, spacing: 4) {
+                        if let now = th.current { Text(eventLine(now, live: true)).foregroundStyle(.orange) }
+                        ForEach(th.events.prefix(5)) { e in Text(eventLine(e, live: false)).foregroundStyle(.secondary) }
+                        if th.current == nil && th.events.isEmpty { Text("No throttling recorded yet.").foregroundStyle(.secondary) }
+                        else if !th.events.isEmpty { Button("Clear history") { th.clearHistory() }.buttonStyle(.plain).foregroundStyle(.blue) }
+                    }
+                    .font(.caption)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .transition(appear)
+                }
+            }
+            .animation(anim, value: th.expanded)
         }
     }
 
@@ -545,15 +676,35 @@ struct ContentView: View {
             Text(Image(systemName: "arrow.up")).font(.caption).foregroundStyle(.secondary)
                 + Text(" " + Monitor.rate(m.netUp)).font(.callout).monospacedDigit()
             Spacer(minLength: 0)
-            if let w = m.systemPower {
-                Text(Image(systemName: "bolt.fill")).font(.caption).foregroundStyle(.secondary)
-                    + Text(String(format: " %.1f W", w)).font(.callout).monospacedDigit()
-            }
         }
         .lineLimit(1)
-        .help(m.systemPower.map { _ in
-            "Power the whole Mac is drawing right now" + (m.adapterPower.map { String(format: ". Charger input: %.1f W", $0) } ?? ". Running on battery.")
-        } ?? "Network speed")
+        .help("Network speed")
+    }
+
+    /// Power the whole Mac draws, as a 1-minute graph. The graph's top is the highest reading in the window
+    /// (at least 20 W, rounded up to 10), so quiet and heavy loads both fill the plot sensibly.
+    @ViewBuilder private var powerSection: some View {
+        if let w = m.systemPower {
+            let top = max(20, ((m.powerHistory.max() ?? 0) / 10).rounded(.up) * 10)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("Power").font(.system(size: 13, weight: .semibold))
+                    Spacer()
+                    if let input = m.adapterPower {
+                        Text(String(format: "in %.0f W", input)).monospacedDigit().foregroundStyle(.secondary)
+                    }
+                    Text(String(format: "%.1f W", w)).monospacedDigit()
+                }
+                HistoryGraph(values: m.powerHistory.map { $0 / top * 100 }, capacity: Monitor.maxHistory, lastSample: m.lastSample, color: .orange)
+                    .frame(height: 56)
+                    .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Theme.subtleFill))
+                    .overlay(alignment: .topTrailing) {
+                        Text(String(format: "%.0f W", top)).font(.system(size: 9)).foregroundStyle(.secondary).padding(.trailing, 10).padding(.top, 2)
+                    }
+                    .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Theme.hairline))
+            }
+            .help("Power the whole Mac is drawing right now" + (m.adapterPower.map { String(format: ". Charger input: %.1f W", $0) } ?? ". Running on battery."))
+        }
     }
 
     /// Battery as a bar like RAM and Storage: the fill is the charge level (orange at 20% or less, red at 10% or less),
@@ -642,12 +793,15 @@ struct ContentView: View {
     /// Logo effects: Auto follows the screen, the rest are animations or a fixed level.
     private var logoModes: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                Image(systemName: "applelogo").font(.system(size: 11)).foregroundStyle(.secondary)
+            HStack(spacing: 5) {
                 ForEach(LogoControl.Mode.allCases) { mode in
                     modePill(mode.title, on: l.mode == mode) { l.setMode(mode) }
+                        .help(mode == .music ? "Flash the logo to the beat of whatever the Mac is playing. Asks for audio capture permission the first time." : "")
                 }
-                Spacer(minLength: 0)
+            }
+            if let note = l.musicNote {
+                Text(note).font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+                    .transition(appear)
             }
             if l.mode == .dim {
                 HStack(spacing: 8) {
@@ -659,12 +813,13 @@ struct ContentView: View {
         }
         .padding(.top, 2)
         .animation(anim, value: l.mode == .dim)
+        .animation(anim, value: l.musicNote)
     }
 
     private func modePill(_ title: String, on: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(title).font(.system(size: 11, weight: .semibold)).lineLimit(1).fixedSize()
-                .padding(.horizontal, 10).padding(.vertical, 5)
+                .padding(.horizontal, 7).padding(.vertical, 5)
                 .foregroundStyle(on ? Color.white : Color.primary)
                 .background(Capsule(style: .continuous).fill(on ? Color.accentColor : Theme.subtleFill))
                 .overlay(Capsule(style: .continuous).strokeBorder(on ? Color.clear : Theme.hairline))

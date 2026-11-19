@@ -22,6 +22,7 @@ only the Command Line Tools.
 - CPU and GPU temperature, and the speed of each fan
 - Disk: remaining storage on the startup volume (read and write speed in the tooltip)
 - Battery health and charge cycle count
+- **Throttle detector**: whether macOS is limiting performance for heat or power (system thermal pressure and the GPU's thermal and power-limit counters), the clock speed of each core tier, and a history of when and why it happened (click the row)
 - Network download and upload speed, and the power the whole Mac is drawing (watts)
 - RAM used and memory pressure (normal, warning, critical)
 - Choose what appears in the menu bar: CPU, GPU, fan speed, CPU temp, GPU temp, free disk space (fixed-width text, so it doesn't jitter)
@@ -35,7 +36,7 @@ only the Command Line Tools.
 - **Screen**: black out every display for cleaning (Esc or 2 minutes ends it)
 - **Stay on**: keep the display from sleeping
 - **Lid**: stay awake with the lid closed (`pmset disablesleep`, run by the helper, so no password prompt after the one-time install; it reverts if the app quits or crashes)
-- **Logo**: the glowing Apple logo, on or off, with **Breathe**, **Pulse**, **Beat** and **Dim** modes
+- **Logo**: the glowing Apple logo, on or off, with **Breathe**, **Pulse**, **Beat** and **Dim** modes, plus **Music**, which flashes the logo to the beat of whatever the Mac is playing (a Core Audio tap; asks for audio capture permission once, macOS 14.2+)
   (MacBook Pro with a PROLED XDR display only; the tile doesn't appear on other Macs)
 - **Dark**: dark or light appearance
 - **Key light**: keyboard backlight, cycling Auto (ambient sensor), On (fixed level), Off
@@ -113,8 +114,8 @@ ever installed the fan helper.
 ## Making a release (maintainers)
 
 ```sh
-./tools/make_dmg.sh 1.2          # builds SiliconMonitor-1.2.dmg (version number is optional)
-gh release create v1.2 SiliconMonitor-1.2.dmg --title "SiliconMonitor 1.2" --notes "What changed"
+./tools/make_dmg.sh 1.3          # builds SiliconMonitor-1.3.dmg (version number is optional)
+gh release create v1.3 SiliconMonitor-1.3.dmg --title "SiliconMonitor 1.3" --notes "What changed"
 ```
 
 `make_dmg.sh` runs `bundle.sh` with that version, packs the app with an Applications shortcut, and verifies the image.
