@@ -583,7 +583,7 @@ struct ContentView: View {
         func hm(_ min: Int) -> String { min >= 60 ? "\(min / 60)h \(min % 60)m" : "\(min)m" }
         let detail: String
         if m.batteryCharging { detail = m.batteryMinutes.map { hm($0) + " to full" } ?? "Charging" }
-        else if m.batteryPlugged { detail = pct >= 100 ? "Plugged in" : "Not charging" }
+        else if m.batteryPlugged { detail = (pct >= 99 || m.batteryFull) ? "Plugged in" : "Charge paused" }
         else { detail = m.batteryMinutes.map { hm($0) + " left" } ?? "On battery" }
         return "\(pct)%  ·  \(detail)"
     }

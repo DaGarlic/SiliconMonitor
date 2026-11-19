@@ -136,6 +136,14 @@ final class SystemToggles: ObservableObject {
     // MARK: Desktop icons
 
     func setIconsHidden(_ hidden: Bool) {
+        // Restarting Finder interrupts anything it is copying, so ask first.
+        let alert = NSAlert()
+        alert.messageText = hidden ? "Hide desktop icons?" : "Show desktop icons?"
+        alert.informativeText = "Finder restarts to apply this, which stops any file copy it is running. Its windows reopen afterwards."
+        alert.addButton(withTitle: hidden ? "Hide Icons" : "Show Icons")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
         CFPreferencesSetAppValue("CreateDesktop" as CFString, NSNumber(value: !hidden), "com.apple.finder" as CFString)
         CFPreferencesAppSynchronize("com.apple.finder" as CFString)
         iconsHidden = hidden

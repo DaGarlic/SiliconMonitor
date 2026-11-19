@@ -55,6 +55,8 @@ final class Monitor: ObservableObject {
     @Published var batteryPercent: Int?
     @Published var batteryPlugged = false       // a charger is connected
     @Published var batteryCharging = false
+    @Published var batteryFull = false          // macOS reports the battery as fully charged
+    @Published var batteryAmps: Int = 0         // signed battery current in mA (positive while charging)
     @Published var batteryMinutes: Int?         // to full while charging, to empty on battery (nil when macOS doesn't know yet)
     @Published var chargerWatts: Int?           // the connected charger's rating
     // Memory: used = app + wired + compressed (as Activity Monitor counts it); pressure is the kernel's 1/2/4 level.
@@ -174,7 +176,7 @@ final class Monitor: ObservableObject {
         updateDisk()
         updateMemory()
         updateNetwork()
-        if Date().timeIntervalSince(lastBatteryCheck) > 10 { lastBatteryCheck = Date(); updateBattery() }
+        if Date().timeIntervalSince(lastBatteryCheck) > 2 { lastBatteryCheck = Date(); updateBattery() }
         if record {
             lastSample = Date()
             cpuHistory.append(cpu); gpuHistory.append(gpu)
@@ -282,7 +284,13 @@ final class Monitor: ObservableObject {
         cycleCount = (prop("CycleCount") as? NSNumber)?.intValue
         batteryPercent = (prop("CurrentCapacity") as? NSNumber)?.intValue
         batteryPlugged = (prop("ExternalConnected") as? NSNumber)?.boolValue ?? false
-        batteryCharging = (prop("IsCharging") as? NSNumber)?.boolValue ?? false
+        batteryFull = (prop("FullyCharged") as? NSNumber)?.boolValue ?? false
+        // Amperage is a signed 64-bit value; read it as Int64 so a discharge doesn't show up as a huge positive number.
+        batteryAmps = Int((prop("Amperage") as? NSNumber)?.int64Value ?? 0)
+        let flag = (prop("IsCharging") as? NSNumber)?.boolValue ?? false
+        let chargerFlag = ((prop("ChargerData") as? [String: Any])?["IsCharging"] as? NSNumber)?.boolValue ?? false
+        // IsCharging can flicker or lag, so also trust the charger's own flag and a clearly positive battery current.
+        batteryCharging = !batteryFull && (flag || chargerFlag || (batteryPlugged && batteryAmps > 100))
         func minutes(_ k: String) -> Int? { (prop(k) as? NSNumber).map(\.intValue).flatMap { $0 > 0 && $0 < 6000 ? $0 : nil } }
         batteryMinutes = batteryCharging ? minutes("AvgTimeToFull") : (batteryPlugged ? nil : minutes("AvgTimeToEmpty") ?? minutes("TimeRemaining"))
         chargerWatts = ((prop("AdapterDetails") as? [String: Any])?["Watts"] as? NSNumber).map(\.intValue)

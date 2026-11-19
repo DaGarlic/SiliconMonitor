@@ -113,8 +113,8 @@ ever installed the fan helper.
 ## Making a release (maintainers)
 
 ```sh
-./tools/make_dmg.sh 1.1          # builds SiliconMonitor-1.1.dmg (version number is optional)
-gh release create v1.1 SiliconMonitor-1.1.dmg --title "SiliconMonitor 1.1" --notes "What changed"
+./tools/make_dmg.sh 1.2          # builds SiliconMonitor-1.2.dmg (version number is optional)
+gh release create v1.2 SiliconMonitor-1.2.dmg --title "SiliconMonitor 1.2" --notes "What changed"
 ```
 
 `make_dmg.sh` runs `bundle.sh` with that version, packs the app with an Applications shortcut, and verifies the image.

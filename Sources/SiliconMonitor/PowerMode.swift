@@ -15,7 +15,12 @@ final class PowerMode: ObservableObject {
 
     init() {
         // Reflect reality: SleepDisabled may still be on from an earlier session that didn't get to revert it.
-        lidAwake = Self.readSleepDisabled()
+        Task { await refreshLid() }
+    }
+
+    /// Re-reads the system flag off the main thread (pmset can take a moment).
+    private func refreshLid() async {
+        lidAwake = await Task.detached { Self.readSleepDisabled() }.value
     }
 
     // MARK: Keep screen on
@@ -42,7 +47,7 @@ final class PowerMode: ObservableObject {
         lastError = nil
         Task {
             let ok = await applyLid(on)
-            lidAwake = Self.readSleepDisabled()
+            await refreshLid()
             if !ok { lastError = "Couldn't reach the helper (admin approval cancelled or failed)." }
             busy = false
         }
@@ -52,11 +57,11 @@ final class PowerMode: ObservableObject {
     /// needed the first time, when the helper is installed. While the lid stays awake this app keeps a connection
     /// open: if the app quits or crashes, the helper lets the Mac sleep again on its own.
     private func applyLid(_ on: Bool) async -> Bool {
-        var r = FanController.openConnection()
+        var r = await Task.detached { FanController.openConnection() }.value
         if r.status == .unreachable || r.status == .wrongVersion {
             guard await Task.detached(operation: { FanController.installHelper() }).value else { return false }
             for _ in 0..<50 {                                   // up to 5 s for the new daemon to start listening
-                r = FanController.openConnection()
+                r = await Task.detached { FanController.openConnection() }.value
                 if r.status == .ok || r.status == .busy { break }
                 try? await Task.sleep(nanoseconds: 100_000_000)
             }
@@ -67,7 +72,7 @@ final class PowerMode: ObservableObject {
             helperFD = r.fd
             sendToHelper("LID 1")
             heartbeat = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
-                Task { @MainActor in self?.sendToHelper("PING") }
+                Task { @MainActor in self?.sendToHelper("PING"); self?.checkHelper() }
             }
         } else {
             closeLink()
@@ -84,7 +89,22 @@ final class PowerMode: ObservableObject {
         let bytes = Array((line + "\n").utf8)
         if write(helperFD, bytes, bytes.count) < 0 {            // helper went away: it has let the Mac sleep again
             closeLink()
-            lidAwake = Self.readSleepDisabled()
+            Task { await refreshLid() }
+        }
+    }
+
+    /// The helper can end the lid hold by itself (it got too hot, or the helper stopped): pick that up.
+    private func checkHelper() {
+        guard helperFD >= 0 else { return }
+        var p = pollfd(fd: helperFD, events: Int16(POLLIN), revents: 0)
+        guard poll(&p, 1, 0) > 0 else { return }
+        var buf = [UInt8](repeating: 0, count: 256)
+        let n = read(helperFD, &buf, buf.count)
+        if n <= 0 { closeLink(); Task { await refreshLid() }; return }
+        if String(decoding: buf.prefix(n), as: UTF8.self).contains("LIDOFF") {
+            closeLink()
+            lidAwake = false
+            lastError = "The Mac got hot, so it can sleep again with the lid closed."
         }
     }
 
@@ -101,7 +121,7 @@ final class PowerMode: ObservableObject {
             closeLink()
         } else if lidAwake {
             // Stale flag from an earlier session: clear it if the helper is already there (never prompt while quitting).
-            let r = FanController.openConnection()
+            let r = await Task.detached { FanController.openConnection() }.value
             if r.status == .ok {
                 let bytes = Array("LID 0\n".utf8)
                 _ = write(r.fd, bytes, bytes.count)
@@ -109,7 +129,7 @@ final class PowerMode: ObservableObject {
                 close(r.fd)
             }
         }
-        lidAwake = Self.readSleepDisabled()
+        await refreshLid()
     }
 
     // MARK: Helpers

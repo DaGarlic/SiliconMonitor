@@ -35,7 +35,8 @@ final class UpdateChecker: ObservableObject {
             guard let data,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let tag = json["tag_name"] as? String,
-                  let page = (json["html_url"] as? String).flatMap(URL.init(string:)) else { return }
+                  let page = (json["html_url"] as? String).flatMap(URL.init(string:)),
+                  page.scheme == "https", page.host == "github.com" else { return }   // only ever offer a GitHub page
             let version = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {

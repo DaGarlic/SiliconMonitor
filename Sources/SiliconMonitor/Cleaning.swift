@@ -81,6 +81,9 @@ final class CleaningMode: ObservableObject {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let url = dir.appendingPathComponent("keyboard.log")
         let data = Data("\(Date()) \(line)\n".utf8)
+        if let size = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int, size > 100_000 {
+            try? FileManager.default.removeItem(at: url)   // keep the log small
+        }
         if let h = try? FileHandle(forWritingTo: url) { h.seekToEndOfFile(); h.write(data); try? h.close() }
         else { try? data.write(to: url) }
     }

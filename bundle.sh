@@ -2,7 +2,7 @@
 # Builds a release binary and wraps it in SiliconMonitor.app (menu bar only, no Dock icon).
 set -e
 cd "$(dirname "$0")"
-VERSION="${VERSION:-1.1}"   # shown in Finder's Get Info; override with VERSION=1.1 ./bundle.sh
+VERSION="${VERSION:-1.2}"   # shown in Finder's Get Info; override with VERSION=1.2 ./bundle.sh
 swift build -c release
 APP=SiliconMonitor.app
 rm -rf "$APP"

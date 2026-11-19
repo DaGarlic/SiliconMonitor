@@ -49,7 +49,7 @@ final class FanController: ObservableObject {
         busy = true
         message = nil
         Task {
-            var result = connect()
+            var result = await connect()
             if result == .unreachable || result == .wrongVersion {
                 // Not installed yet (or an old copy): install once. This is the only password prompt.
                 let installed = await Task.detached { Self.installHelper() }.value
@@ -59,7 +59,7 @@ final class FanController: ObservableObject {
                     return
                 }
                 for _ in 0..<50 {                              // give the new daemon up to 5 s to start listening
-                    result = connect()
+                    result = await connect()
                     if result == .ok || result == .busy { break }
                     try? await Task.sleep(nanoseconds: 100_000_000)
                 }
@@ -109,8 +109,8 @@ final class FanController: ObservableObject {
         if write(fd, bytes, bytes.count) < 0 { helperGone() }
     }
 
-    private func connect() -> Connection {
-        let r = Self.openConnection()
+    private func connect() async -> Connection {
+        let r = await Task.detached { Self.openConnection() }.value   // can wait up to 1.5 s; keep it off the main thread
         guard r.status == .ok else { return r.status }
         fd = r.fd
         let s = r.fd
@@ -194,11 +194,12 @@ final class FanController: ObservableObject {
             + "<string>\(socketPath)</string><string>\(getuid())</string></array>"
             + "<key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>5</integer>"
             + "</dict></plist>"
+        let quotedExe = exe.replacingOccurrences(of: "'", with: "'\\''")   // survives a ' in the app's path
         let script = """
         set -e
         /bin/mkdir -p /Library/PrivilegedHelperTools
         /bin/launchctl bootout system/\(label) >/dev/null 2>&1 || true
-        /bin/cp '\(exe)' '\(installedPath)'
+        /bin/cp '\(quotedExe)' '\(installedPath)'
         /usr/sbin/chown root:wheel '\(installedPath)'
         /bin/chmod 755 '\(installedPath)'
         /usr/bin/printf '%s' '\(plist)' > '\(plistPath)'
