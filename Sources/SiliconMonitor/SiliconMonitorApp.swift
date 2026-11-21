@@ -458,7 +458,7 @@ struct ContentView: View {
                         .help("Stay on: keeps the display from sleeping")
                     Tile(icon: "laptopcomputer", title: "Lid", subtitle: p.busy ? "Wait…" : (p.lidAwake ? "Awake" : "Sleeps"),
                          isOn: p.lidAwake, disabled: p.busy) { p.setLidAwake(!p.lidAwake) }
-                        .help("Lid: keeps the Mac awake with the lid closed (uses the background helper; one admin password the first time)")
+                        .help("Lid: keeps the Mac awake with the lid closed (uses the background helper; one admin password the first time). Don't carry the Mac in a bag while it is on: it stays hot. It turns off when you tap it again or quit.")
                     if l.available {
                         Tile(icon: "applelogo", title: "Logo", subtitle: l.isOn ? l.mode.title : "Off", isOn: l.isOn) { cycleLogo() }
                             .help("The glowing Apple logo on the lid. Tap to cycle Auto, Breathe, Pulse, Beat, Dim, then Off. Right-click to pick a mode directly, including Music.")
@@ -483,13 +483,9 @@ struct ContentView: View {
                 }
                 if logoExtrasShown { logoExtras.transition(appear) }
                 if let msg = c.permissionMessage { note(msg, .orange).transition(appear) }
-                if p.lidAwake {
-                    note("Lid-closed awake is ON. Don't put the Mac in a bag while it's on: it will stay hot. It turns off when you untick it or quit.", .orange)
-                        .transition(appear)
-                }
                 if let e = p.lastError { note(e, .red).transition(appear) }
             }
-            .animation(anim, value: [logoExtrasShown, c.permissionMessage != nil, p.lidAwake, p.lastError != nil])
+            .animation(anim, value: [logoExtrasShown, c.permissionMessage != nil, p.lastError != nil])
 
             if menuBarOpen {
             section("Menu bar") {
