@@ -174,6 +174,8 @@ final class ThrottleMonitor: ObservableObject {
     @Published private(set) var gpuBudget = 1.0
     @Published private(set) var events: [ThrottleEvent] = []
     @Published private(set) var current: ThrottleEvent?
+    /// The top-tier clock as a share of its maximum, one value per tick, for the Clocks graph (0...100).
+    @Published private(set) var clockHistory: [Double] = []
 
     var limited: Bool { !causes.isEmpty }
 
@@ -221,7 +223,13 @@ final class ThrottleMonitor: ObservableObject {
         reading.gpuLoad = gpuLoad
         thermalLevel = reading.thermalLevel
         if let gpu = report?.read("GPU Stats") { Self.fill(&reading, gpu: gpu); gpuBudget = reading.gpuBudget }
-        if let cpu = report?.read("CPU Stats") { clocks = Self.clocks(from: cpu) }
+        if let cpu = report?.read("CPU Stats") {
+            clocks = Self.clocks(from: cpu)
+            if let c = topTierClock, c.maxMHz > 0 {
+                clockHistory.append(min(c.mhz / c.maxMHz * 100, 100))
+                if clockHistory.count > Monitor.maxHistory + 2 { clockHistory.removeFirst(clockHistory.count - Monitor.maxHistory - 2) }
+            }
+        }
 
         causes = reading.causes
         if limited {
@@ -302,6 +310,9 @@ final class ThrottleMonitor: ObservableObject {
         }
         return out
     }
+
+    /// The busiest top-tier ("P") cluster: the one that throttles first, so the one the graph follows.
+    var topTierClock: Clock? { clocks.filter { $0.name.hasPrefix("P") }.max(by: { $0.active < $1.active }) ?? headlineClock }
 
     /// The busiest cluster's clock, for the one-line summary.
     var headlineClock: Clock? { clocks.max(by: { $0.active < $1.active }) }

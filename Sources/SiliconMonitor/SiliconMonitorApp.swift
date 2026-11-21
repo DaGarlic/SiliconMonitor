@@ -432,10 +432,13 @@ struct ContentView: View {
                     .help(String(format: "%d GPU cores. Render %.0f%%  Tiler %.0f%%", m.gpuCoreCount, m.gpuRenderer, m.gpuTiler))
             }
             coreBars
-            powerSection
+            HStack(alignment: .top, spacing: 10) {   // power and clock speed side by side
+                powerSection
+                clocksSection
+            }
+            throttleDetail
             if f.manual || !m.smcAvailable || m.fans.isEmpty { fansSection }   // in Auto the rpm shows in the control row
             fanControlRow
-            throttleSection
             memorySection
             diskSection
 
@@ -524,7 +527,8 @@ struct ContentView: View {
                 .help("Quit SiliconMonitor (⌘Q)")
             }
         }
-        .animation(anim, value: menuBarOpen)   // on the whole stack, so the section fades in while the card grows
+        .animation(anim, value: menuBarOpen)
+        .animation(anim, value: th.expanded)   // on the whole stack, so the section fades in while the card grows
         .padding(14)
         .frame(width: CardStyle.width)
     }
@@ -586,43 +590,63 @@ struct ContentView: View {
         return line
     }
 
-    /// Shows whether macOS is holding the chip back and why, plus a short history of when it happened.
-    @ViewBuilder private var throttleSection: some View {
-        if th.available {
-            VStack(alignment: .leading, spacing: 6) {
-                Button(action: { th.expanded.toggle() }) {
-                    HStack(spacing: 7) {
-                        Image(systemName: th.limited ? "exclamationmark.triangle.fill" : "gauge.with.dots.needle.67percent")
-                            .font(.caption).foregroundStyle(th.limited ? Color.orange : Color.secondary)
-                        Text(th.limited ? (th.causes.first ?? "Limited") + (th.causes.count > 1 ? " +\(th.causes.count - 1)" : "") : "Not throttled")
-                            .font(.callout).lineLimit(1).minimumScaleFactor(0.8)
-                        Spacer(minLength: 4)
-                        Text(clockSummary).font(.caption).foregroundStyle(.secondary).monospacedDigit().lineLimit(1).minimumScaleFactor(0.7)
-                        Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold)).foregroundStyle(.secondary)
+    /// Top-tier clock speed over the last minute as a share of its maximum, next to the Power graph. The graph turns
+    /// orange (and the header says "Limited") while macOS is holding the chip back; tapping opens the event list.
+    @ViewBuilder private var clocksSection: some View {
+        if th.available && !th.clockHistory.isEmpty {
+            let limited = th.limited
+            Button(action: { th.expanded.toggle() }) {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 4) {
+                        Text("Clocks").font(.system(size: 13, weight: .semibold))
+                        Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold)).foregroundStyle(.secondary)
                             .rotationEffect(.degrees(th.expanded ? 180 : 0))
+                        Spacer(minLength: 0)
+                        if limited {
+                            Label("Limited", systemImage: "exclamationmark.triangle.fill").labelStyle(.titleAndIcon)
+                                .font(.callout).foregroundStyle(.orange).lineLimit(1)
+                        } else if let c = th.topTierClock {
+                            Text(String(format: "%.1f GHz", c.mhz / 1000)).monospacedDigit().lineLimit(1)
+                        }
                     }
-                    .padding(.horizontal, 9)
-                    .frame(maxWidth: .infinity, minHeight: 26)
-                    .background(th.limited ? Color.orange.opacity(0.18) : Theme.subtleFill)
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(th.limited ? Color.orange.opacity(0.5) : Theme.hairline))
-                    .contentShape(Rectangle())
+                    HistoryGraph(values: th.clockHistory, capacity: Monitor.maxHistory, lastSample: m.lastSample,
+                                 color: limited ? .orange : .purple)
+                        .frame(height: 40)
+                        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(limited ? Color.orange.opacity(0.12) : Theme.subtleFill))
+                        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .strokeBorder(limited ? Color.orange.opacity(0.5) : Theme.hairline))
                 }
-                .buttonStyle(.plain)
-                .help("Whether macOS is limiting performance because of heat or power, and the clock speed of each core tier. Click for recent events.")
-                if th.expanded {
-                    VStack(alignment: .leading, spacing: 4) {
-                        if let now = th.current { Text(eventLine(now, live: true)).foregroundStyle(.orange) }
-                        ForEach(th.events.prefix(5)) { e in Text(eventLine(e, live: false)).foregroundStyle(.secondary) }
-                        if th.current == nil && th.events.isEmpty { Text("No throttling recorded yet.").foregroundStyle(.secondary) }
-                        else if !th.events.isEmpty { Button("Clear history") { th.clearHistory() }.buttonStyle(.plain).foregroundStyle(.blue) }
-                    }
-                    .font(.caption)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .transition(appear)
-                }
+                .contentShape(Rectangle())
             }
-            .animation(anim, value: th.expanded)
+            .buttonStyle(.plain)
+            .frame(maxWidth: .infinity)
+            .help(clocksTooltip)
+            .animation(anim, value: limited)
+        }
+    }
+
+    private var clocksTooltip: String {
+        var parts: [String] = []
+        parts.append(th.limited ? th.causes.joined(separator: ", ") + "." : "Not throttled.")
+        parts.append("Clock speed of the busiest \(m.topTierName) cluster, as a share of its maximum.")
+        if !clockSummary.isEmpty { parts.append(clockSummary + ".") }
+        parts.append("Click for recent throttling events.")
+        return parts.joined(separator: " ")
+    }
+
+    /// The recent-throttling list under the Power / Clocks row.
+    @ViewBuilder private var throttleDetail: some View {
+        if th.available && th.expanded {
+            VStack(alignment: .leading, spacing: 4) {
+                if th.limited { Text(th.causes.joined(separator: ", ")).foregroundStyle(.orange) }
+                if let now = th.current { Text(eventLine(now, live: true)).foregroundStyle(.orange) }
+                ForEach(th.events.prefix(5)) { e in Text(eventLine(e, live: false)).foregroundStyle(.secondary) }
+                if th.current == nil && th.events.isEmpty { Text("No throttling recorded yet.").foregroundStyle(.secondary) }
+                else if !th.events.isEmpty { Button("Clear history") { th.clearHistory() }.buttonStyle(.plain).foregroundStyle(.blue) }
+            }
+            .font(.caption)
+            .fixedSize(horizontal: false, vertical: true)
+            .transition(appear)
         }
     }
 
@@ -699,9 +723,6 @@ struct ContentView: View {
                 HStack {
                     Text("Power").font(.system(size: 13, weight: .semibold))
                     Spacer()
-                    if let input = m.adapterPower {
-                        Text(String(format: "in %.0f W", input)).monospacedDigit().foregroundStyle(.secondary)
-                    }
                     Text(String(format: "%.1f W", w)).monospacedDigit()
                 }
                 HistoryGraph(values: m.powerHistory.map { $0 / top * 100 }, capacity: Monitor.maxHistory, lastSample: m.lastSample, color: .orange)
@@ -712,6 +733,7 @@ struct ContentView: View {
                     }
                     .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Theme.hairline))
             }
+            .frame(maxWidth: .infinity)
             .help("Power the whole Mac is drawing right now" + (m.adapterPower.map { String(format: ". Charger input: %.1f W", $0) } ?? ". Running on battery."))
         }
     }
