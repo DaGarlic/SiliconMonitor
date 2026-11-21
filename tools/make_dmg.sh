@@ -10,6 +10,10 @@ VERSION="$VERSION" ./bundle.sh
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 cp -R SiliconMonitor.app "$STAGE/"
+# A synced folder (iCloud Desktop) adds Finder / file-provider attributes to the app after it was signed, which
+# makes `codesign --verify` fail on the copy people download. The staging copy is outside it, so clean it here.
+xattr -cr "$STAGE/SiliconMonitor.app"
+codesign --verify --deep --strict "$STAGE/SiliconMonitor.app"
 ln -s /Applications "$STAGE/Applications"
 
 OUT="SiliconMonitor-$VERSION.dmg"
