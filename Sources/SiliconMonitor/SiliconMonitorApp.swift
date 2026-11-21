@@ -427,7 +427,6 @@ struct ContentView: View {
                 .buttonStyle(.plain)
                 .help("Opens the release page on GitHub. You are on \(UpdateChecker.currentVersion).")
             }
-            throttleBanner
             networkSection
             batterySection
             HStack(alignment: .top, spacing: 10) {   // side by side: the two graphs share one row
@@ -530,8 +529,7 @@ struct ContentView: View {
                 .help("Quit SiliconMonitor (⌘Q)")
             }
         }
-        .animation(anim, value: menuBarOpen)
-        .animation(anim, value: th.limited) // on the whole stack, so the section fades in while the card grows
+        .animation(anim, value: menuBarOpen) // on the whole stack, so the section fades in while the card grows
         .padding(14)
         .frame(width: CardStyle.width)
     }
@@ -591,26 +589,6 @@ struct ContentView: View {
                      e.peakPower.map { String(format: "%.0f W", $0) }].compactMap { $0 }.filter { !$0.hasPrefix("CPU 0") && !$0.hasPrefix("GPU 0") && $0 != "0 W" }
         if !temps.isEmpty { line += " · peak " + temps.joined(separator: ", ") }
         return line
-    }
-
-    /// A slim strip at the top while macOS is limiting performance, with the cause; it goes away when throttling ends.
-    @ViewBuilder private var throttleBanner: some View {
-        if th.available && th.limited {
-            HStack(spacing: 6) {
-                Image(systemName: "exclamationmark.triangle.fill").font(.caption)
-                Text(th.causes.first.map { $0 + (th.causes.count > 1 ? " +\(th.causes.count - 1)" : "") } ?? "Performance limited")
-                    .font(.callout).lineLimit(1).minimumScaleFactor(0.8)
-                Spacer(minLength: 0)
-            }
-            .foregroundStyle(.orange)
-            .padding(.horizontal, 9)
-            .frame(maxWidth: .infinity, minHeight: 26)
-            .background(Color.orange.opacity(0.18))
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Color.orange.opacity(0.5)))
-            .help(th.causes.joined(separator: ", "))
-            .transition(appear)
-        }
     }
 
     /// Top-tier clock speed over the last minute as a share of its maximum, next to the Power graph. Stretches where
