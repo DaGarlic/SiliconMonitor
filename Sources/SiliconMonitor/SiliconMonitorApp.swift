@@ -832,12 +832,7 @@ struct ContentView: View {
     /// Logo effects: Auto follows the screen, the rest are animations or a fixed level.
     private var logoModes: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 5) {   // tied to the Logo tile above by the same blue and the apple glyph
-                Image(systemName: "applelogo").font(.system(size: 10, weight: .semibold))
-                Text("LOGO EFFECT").font(.system(size: 10.5, weight: .semibold)).tracking(0.4)
-            }
-            .foregroundStyle(Color.accentColor)
-            HStack(spacing: 4) {   // six chips must fit the narrower grouped container
+            HStack(spacing: 5) {
                 ForEach(LogoControl.Mode.allCases) { mode in
                     modePill(mode.title, on: l.mode == mode) { l.setMode(mode) }
                         .help(mode == .music ? "Flash the logo to the beat of whatever the Mac is playing. Asks for audio capture permission the first time." : "")
@@ -855,10 +850,7 @@ struct ContentView: View {
                 .transition(appear)
             }
         }
-        .padding(8)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.accentColor.opacity(0.10)))
-        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Color.accentColor.opacity(0.28)))
+        .padding(.top, 2)
         .animation(anim, value: l.mode == .dim)
         .animation(anim, value: l.musicNote)
     }
@@ -866,7 +858,7 @@ struct ContentView: View {
     private func modePill(_ title: String, on: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(title).font(.system(size: 11, weight: .semibold)).lineLimit(1).fixedSize()
-                .padding(.horizontal, 6).padding(.vertical, 5)
+                .padding(.horizontal, 7).padding(.vertical, 5)
                 .foregroundStyle(on ? Color.white : Color.primary)
                 .background(Capsule(style: .continuous).fill(on ? Color.accentColor : Theme.subtleFill))
                 .overlay(Capsule(style: .continuous).strokeBorder(on ? Color.clear : Theme.hairline))
