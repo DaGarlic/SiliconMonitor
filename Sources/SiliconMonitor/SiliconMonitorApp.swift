@@ -147,8 +147,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // menu bar image is only redrawn when its text actually changed.
         monitor.onRefresh = { [weak self] in self?.updateStatusItem(); self?.fitCard() }
         // Setting toggles change the text immediately, between refreshes.
-        monitor.$showCPU.merge(with: monitor.$showGPU, monitor.$showCPUTemp, monitor.$showGPUTemp, monitor.$showFan, monitor.$showDisk)
+        monitor.$showCPU.merge(with: monitor.$showGPU, monitor.$showCPUTemp, monitor.$showGPUTemp, monitor.$showFan, monitor.$showDisk, monitor.$showPower)
             .dropFirst().receive(on: RunLoop.main).sink { [weak self] _ in self?.updateStatusItem() }.store(in: &cancellables)
+        monitor.$useFahrenheit.dropFirst().receive(on: RunLoop.main).sink { [weak self] _ in self?.updateStatusItem() }.store(in: &cancellables)
         for o in [cleaning.objectWillChange, power.objectWillChange, fanControl.objectWillChange, logo.objectWillChange, tools.objectWillChange] {
             o.receive(on: RunLoop.main).sink { [weak self] _ in
                 DispatchQueue.main.async { self?.fitCard() }
@@ -432,15 +433,17 @@ struct ContentView: View {
             HStack(alignment: .top, spacing: 10) {   // side by side: the two graphs share one row
                 graph("CPU", value: m.cpu, temp: m.cpuTemp, history: m.cpuHistory, color: .blue)
                 graph("GPU", value: m.gpu, temp: m.gpuTemp, history: m.gpuHistory, color: .green)
-                    .help(String(format: "%d GPU cores. Render %.0f%%  Tiler %.0f%%", m.gpuCoreCount, m.gpuRenderer, m.gpuTiler))
+                    .help((m.gpuCoreCount > 0 ? "\(m.gpuCoreCount) GPU cores. " : "") + String(format: "Render %.0f%%  Tiler %.0f%%", m.gpuRenderer, m.gpuTiler))
             }
             coreBars
-            HStack(alignment: .top, spacing: 10) {   // power and clock speed side by side
-                powerSection
-                clocksSection
+            if m.systemPower != nil || (th.available && !th.clockHistory.isEmpty) {   // an empty row would still add a gap
+                HStack(alignment: .top, spacing: 10) {   // power and clock speed side by side
+                    powerSection
+                    clocksSection
+                }
             }
             if f.manual || !m.smcAvailable || m.fans.isEmpty { fansSection }   // in Auto the rpm shows in the control row
-            fanControlRow
+            if !m.fans.isEmpty { fanControlRow }   // fanless Macs (MacBook Air) have nothing to control
             memorySection
             diskSection
 
@@ -489,23 +492,26 @@ struct ContentView: View {
 
             if menuBarOpen {
             section("Menu bar") {
-                LazyVGrid(columns: five, spacing: 6) {
+                LazyVGrid(columns: four, spacing: 6) {
                     Tile(icon: "cpu", title: "CPU", subtitle: "", isOn: m.showCPU, inline: true) { m.showCPU.toggle() }
                     Tile(icon: "square.stack.3d.up", title: "GPU", subtitle: "", isOn: m.showGPU, inline: true) { m.showGPU.toggle() }
                     Tile(icon: "fan", title: "Fan", subtitle: "", isOn: m.showFan, inline: true) { m.showFan.toggle() }
                     Tile(icon: "thermometer.medium", title: "CPU°", subtitle: "", isOn: m.showCPUTemp, inline: true) { m.showCPUTemp.toggle() }
                     Tile(icon: "thermometer.high", title: "GPU°", subtitle: "", isOn: m.showGPUTemp, inline: true) { m.showGPUTemp.toggle() }
                     Tile(icon: "internaldrive", title: "Disk", subtitle: "", isOn: m.showDisk, inline: true) { m.showDisk.toggle() }
+                    Tile(icon: "bolt", title: "Power", subtitle: "", isOn: m.showPower, inline: true) { m.showPower.toggle() }
                 }
             }
             .transition(appear)
+            section("General") { GeneralOptions() }
+                .transition(appear)
             }
 
             // Footer: the set-once menu bar choices fold away; Quit is a quiet capsule, not a full-width button.
             HStack {
                 Button(action: { menuBarOpen.toggle() }) {
                     HStack(spacing: 4) {
-                        Text("MENU BAR OPTIONS").font(.system(size: 10.5, weight: .semibold)).tracking(0.4)
+                        Text("OPTIONS").font(.system(size: 10.5, weight: .semibold)).tracking(0.4)
                         Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold))
                             .rotationEffect(.degrees(menuBarOpen ? 180 : 0))
                     }
@@ -513,7 +519,7 @@ struct ContentView: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .help("Choose what appears in the menu bar")
+                .help("What appears in the menu bar, launch at login, units and refresh rate")
                 Spacer()
                 Button(action: onQuit) {
                     Text("Quit").font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
@@ -582,7 +588,7 @@ struct ContentView: View {
         let length = secs >= 60 ? "\(secs / 60)m \(secs % 60)s" : "\(secs)s"
         let time = e.start.formatted(date: .omitted, time: .shortened)
         var line = "\(live ? "Now" : time) · \(length) · \(e.causes.joined(separator: ", "))"
-        let temps = [e.peakCPUTemp.map { String(format: "CPU %.0f°", $0) }, e.peakGPUTemp.map { String(format: "GPU %.0f°", $0) },
+        let temps = [e.peakCPUTemp.map { String(format: "CPU %.0f°", m.degrees($0)) }, e.peakGPUTemp.map { String(format: "GPU %.0f°", m.degrees($0)) },
                      e.peakPower.map { String(format: "%.0f W", $0) }].compactMap { $0 }.filter { !$0.hasPrefix("CPU 0") && !$0.hasPrefix("GPU 0") && $0 != "0 W" }
         if !temps.isEmpty { line += " · peak " + temps.joined(separator: ", ") }
         return line
@@ -661,6 +667,7 @@ struct ContentView: View {
             let used = Double(m.diskTotal - m.diskFree) / Double(m.diskTotal)
             barRow(icon: "internaldrive", fraction: used,
                    color: used > 0.9 ? .orange : .blue,
+                   leading: used > 0.9 ? Text("Low space").font(.caption).foregroundStyle(.orange) : nil,
                    value: Text(String(format: "%.0f / %.0f GB free", Double(m.diskFree) / 1e9, Double(m.diskTotal) / 1e9)).font(.callout).monospacedDigit())
                 .help(String(format: "%.0f GB free of %.0f GB. ", Double(m.diskFree) / 1e9, Double(m.diskTotal) / 1e9)
                       + "Reading " + Monitor.rate(m.diskRead) + ", writing " + Monitor.rate(m.diskWrite) + ".")
@@ -672,11 +679,13 @@ struct ContentView: View {
         if m.memTotal > 0 {
             let (label, color): (String, Color) = m.memPressure >= 4 ? ("Critical", .red) : m.memPressure >= 2 ? ("Warning", .yellow) : ("Normal", .green)
             let swapping = m.swapUsed >= 50_000_000   // only when macOS is actually swapping
+            let heavySwap = m.swapUsed >= UInt64(Self.gib)   // a gigabyte or more in swap is worth noticing
             barRow(icon: "memorychip", fraction: Double(m.memUsed) / Double(m.memTotal), color: color,
+                   leading: m.memPressure >= 2 ? Text("Pressure: \(label)").font(.caption).foregroundStyle(color) : nil,
                    value: Text(String(format: "%.1f / %.0f GB", Double(m.memUsed) / Self.gib, Double(m.memTotal) / Self.gib))
                             .font(.callout).monospacedDigit()
                         + Text(swapping ? String(format: " +%.1f swap", Double(m.swapUsed) / Self.gib) : "")
-                            .font(.caption).foregroundStyle(.secondary))
+                            .font(.caption).foregroundStyle(heavySwap ? Color.orange : Color.secondary))
             .help(String(format: "Memory pressure: %@. Swap used: %.1f GB.", label, Double(m.swapUsed) / Self.gib))
         }
     }
@@ -910,13 +919,50 @@ struct ContentView: View {
             HStack {
                 Text(name).font(.system(size: 13, weight: .semibold))
                 Spacer()
-                if let t = temp { Text(String(format: "%.0f°C", t)).monospacedDigit().foregroundStyle(Color.primary.opacity(0.75)) }
+                if let t = temp { Text(String(format: "%.0f%@", m.degrees(t), m.unitSymbol)).monospacedDigit().foregroundStyle(Color.primary.opacity(0.75)) }
                 Text(String(format: "%.0f%%", value)).monospacedDigit()
             }
             HistoryGraph(values: history, capacity: Monitor.maxHistory, lastSample: m.lastSample, color: color)
                 .frame(height: 40)
                 .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Theme.subtleFill))
                 .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Theme.hairline))
+        }
+    }
+}
+
+/// Launch at login, temperature units and how often the readings update.
+struct GeneralOptions: View {
+    @EnvironmentObject var m: Monitor
+    @ObservedObject private var login = LoginItem.shared
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            row("Launch at login") {
+                Toggle("", isOn: Binding(get: { login.enabled }, set: { login.set($0) }))
+                    .toggleStyle(.switch).labelsHidden().controlSize(.small)
+            }
+            if let note = login.note {
+                Text(note).font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+            }
+            row("Temperature") {
+                Picker("", selection: $m.useFahrenheit) { Text("°C").tag(false); Text("°F").tag(true) }
+                    .pickerStyle(.segmented).labelsHidden().frame(width: 110)
+            }
+            row("Refresh every") {
+                Picker("", selection: $m.refreshSeconds) {
+                    ForEach(Monitor.refreshChoices, id: \.self) { Text("\(Int($0)) s").tag($0) }
+                }
+                .pickerStyle(.segmented).labelsHidden().frame(width: 140)
+            }
+        }
+        .onAppear { login.refresh() }
+    }
+
+    private func row<C: View>(_ title: String, @ViewBuilder _ control: () -> C) -> some View {
+        HStack {
+            Text(title).font(.callout)
+            Spacer(minLength: 8)
+            control()
         }
     }
 }

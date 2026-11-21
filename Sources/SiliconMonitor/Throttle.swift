@@ -249,7 +249,7 @@ final class ThrottleMonitor: ObservableObject {
             current?.peakPower = max(current?.peakPower ?? 0, power ?? 0)
         } else if var event = current {
             clearTicks += 1
-            if clearTicks >= 5 {             // clear for 5 s in a row ends it, so flicker is one event
+            if Double(clearTicks) * Monitor.sampleInterval >= 5 {             // clear for 5 s in a row ends it, so flicker is one event
                 event.end = Date().addingTimeInterval(-5)
                 if !currentIsFake {              // faked events from the debug switch never reach the history
                     events.insert(event, at: 0)
@@ -261,6 +261,9 @@ final class ThrottleMonitor: ObservableObject {
             }
         }
     }
+
+    /// Starts the Clocks graph over (the sample spacing changed).
+    func resetHistory() { clockHistory = []; limitedHistory = [] }
 
     func clearHistory() {
         events = []

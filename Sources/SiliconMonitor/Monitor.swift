@@ -82,8 +82,13 @@ final class Monitor: ObservableObject {
     private var timer: Timer?
     @Published var coreLoads: [Double] = []
     // Rolling 1-minute history, one sample per refresh tick (every `sampleInterval` seconds).
-    static let sampleInterval: TimeInterval = 1
-    static let maxHistory = Int(60 / sampleInterval)
+    static let refreshChoices: [Double] = [1, 2, 5]
+    /// Seconds between samples, from Settings (1, 2 or 5). The graphs always cover the last minute.
+    static var sampleInterval: TimeInterval {
+        let v = UserDefaults.standard.double(forKey: "refreshSeconds")
+        return refreshChoices.contains(v) ? v : 1
+    }
+    static var maxHistory: Int { Int(60 / sampleInterval) }
     /// Called once at the end of every refresh (so observers don't react to each individual value).
     var onRefresh: (() -> Void)?
     @Published var lastSample = Date()   // when the newest history sample was taken (drives smooth scrolling)
@@ -109,6 +114,23 @@ final class Monitor: ObservableObject {
     @Published var showGPUTemp: Bool { didSet { UserDefaults.standard.set(showGPUTemp, forKey: "showGPUTemp") } }
     @Published var showFan: Bool { didSet { UserDefaults.standard.set(showFan, forKey: "showFan") } }
     @Published var showDisk: Bool { didSet { UserDefaults.standard.set(showDisk, forKey: "showDisk") } }
+    @Published var showPower: Bool { didSet { UserDefaults.standard.set(showPower, forKey: "showPower") } }
+
+    /// Settings. Temperatures are read and stored in °C; only what is shown changes.
+    @Published var useFahrenheit: Bool { didSet { UserDefaults.standard.set(useFahrenheit, forKey: "useFahrenheit") } }
+    @Published var refreshSeconds: Double {
+        didSet {
+            guard refreshSeconds != oldValue else { return }
+            UserDefaults.standard.set(refreshSeconds, forKey: "refreshSeconds")
+            // Samples are now a different distance apart, so start the graphs over rather than mixing spacings.
+            cpuHistory = []; gpuHistory = []; powerHistory = []; throttle.resetHistory()
+            timer?.invalidate(); timer = nil
+            start()
+        }
+    }
+
+    func degrees(_ celsius: Double) -> Double { useFahrenheit ? celsius * 9 / 5 + 32 : celsius }
+    var unitSymbol: String { useFahrenheit ? "°F" : "°C" }
 
     // Left-pads with spaces; the menu bar image uses a monospaced font, so every character is the same width.
     private func pad(_ v: Double?, width: Int) -> String {
@@ -129,10 +151,11 @@ final class Monitor: ObservableObject {
         var cells: [MenuCell] = []
         if showCPU { cells.append(MenuCell(label: "CPU", value: num(cpu) + "%", sample: "100%")) }
         if showGPU { cells.append(MenuCell(label: "GPU", value: num(gpu) + "%", sample: "100%")) }
-        if showCPUTemp { cells.append(MenuCell(label: "CPU°", value: num(cpuTemp) + "°", sample: "100°")) }
-        if showGPUTemp { cells.append(MenuCell(label: "GPU°", value: num(gpuTemp) + "°", sample: "100°")) }
+        if showCPUTemp { cells.append(MenuCell(label: "CPU°", value: num(cpuTemp.map(degrees)) + "°", sample: "212°")) }
+        if showGPUTemp { cells.append(MenuCell(label: "GPU°", value: num(gpuTemp.map(degrees)) + "°", sample: "212°")) }
         if showFan { cells.append(MenuCell(label: "FAN", value: num(fans.first?.rpm), sample: "9999")) }
         if showDisk { cells.append(MenuCell(label: "DISK", value: num(Double(diskFree) / 1e9) + "G", sample: "999G")) }
+        if showPower { cells.append(MenuCell(label: "PWR", value: num(systemPower) + "W", sample: "100W")) }
         return cells
     }
 
@@ -148,6 +171,10 @@ final class Monitor: ObservableObject {
         showGPUTemp = flag("showGPUTemp", false)
         showFan = flag("showFan", true)
         showDisk = flag("showDisk", false)
+        showPower = flag("showPower", false)
+        useFahrenheit = flag("useFahrenheit", false)
+        let saved = d.double(forKey: "refreshSeconds")
+        refreshSeconds = Self.refreshChoices.contains(saved) ? saved : 1
         smcAvailable = smc_open() == 0
         if smcAvailable { discoverKeys() }
         refresh()

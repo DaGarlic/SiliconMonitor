@@ -25,7 +25,9 @@ only the Command Line Tools.
 - **Throttle detector**: a Clocks graph beside the Power graph that follows the top core tier's clock speed and turns orange when macOS is limiting performance for heat or power (system thermal pressure and the GPU's thermal and power-limit counters). Click it for a history of when and why it happened
 - Network download and upload speed, and the power the whole Mac is drawing (watts)
 - RAM used and memory pressure (normal, warning, critical)
-- Choose what appears in the menu bar: CPU, GPU, fan speed, CPU temp, GPU temp, free disk space (fixed-width text, so it doesn't jitter)
+- Choose what appears in the menu bar: CPU, GPU, fan speed, CPU temp, GPU temp, free disk space, power draw (fixed-width text, so it doesn't jitter)
+- **Options** (the footer of the card): launch at login, °C or °F, and how often the readings update (1, 2 or 5 seconds; the graphs always show the last minute)
+- Memory and storage say so in words when they need attention: memory pressure, a gigabyte or more of swap, and a nearly full disk
 
 **Fan control**
 - Auto (macOS decides), Manual with a slider from each fan's minimum to maximum speed, or **Max**
