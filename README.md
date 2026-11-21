@@ -176,7 +176,18 @@ See the header comment in [`LogoControl.swift`](Sources/SiliconMonitor/LogoContr
 .build/release/SiliconMonitor --tools-selftest       # round-trip dark mode and keyboard backlight (flashes the screen)
 .build/release/SiliconMonitor --install-fan-helper   # run the one-time helper install from a shell
 SILICONMONITOR_SHOW_CARD=1 open ...                  # open the card at launch (handy for screenshots)
+defaults write local.siliconmonitor fakeThrottle -bool true    # pretend macOS is throttling (delete the key to stop)
 ```
+
+## Tests
+
+```sh
+./tools/run_tests.sh
+```
+
+Unit tests (Swift Testing) cover the throttle detector's cause rules, the update check's version comparison, where the
+card is placed on screen, and the number formatting. The script exists because with only the Command Line Tools
+installed, `swift test` can't find the Testing macro plugin by itself; with Xcode selected a plain `swift test` works too.
 
 ## Project layout
 
@@ -190,9 +201,10 @@ SILICONMONITOR_SHOW_CARD=1 open ...                  # open the card at launch (
 | `Sources/SiliconMonitor/LogoControl.swift` | Apple logo control |
 | `Sources/SiliconMonitor/SystemTools.swift` | Dark mode, keyboard backlight, desktop icons |
 | `Sources/SiliconMonitor/Cleaning.swift`, `PowerMode.swift` | Keyboard and screen cleaning, keep-awake |
+| `Tests/SiliconMonitorTests` | Unit tests |
 | `bundle.sh` | Builds and signs `SiliconMonitor.app` |
 | `tools/make_dmg.sh` | Packs the app into a downloadable `.dmg` |
-| `tools/` | Icon generator, signing-identity, DMG and uninstall scripts |
+| `tools/` | Icon generator, signing-identity, DMG, test and uninstall scripts |
 
 ## Known limitations
 

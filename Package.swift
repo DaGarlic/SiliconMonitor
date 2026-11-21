@@ -7,5 +7,6 @@ let package = Package(
     targets: [
         .target(name: "CSMC", linkerSettings: [.linkedFramework("IOKit")]),
         .executableTarget(name: "SiliconMonitor", dependencies: ["CSMC"]),
+        .testTarget(name: "SiliconMonitorTests", dependencies: ["SiliconMonitor"]),
     ]
 )
