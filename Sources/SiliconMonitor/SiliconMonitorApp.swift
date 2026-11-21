@@ -187,6 +187,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func updateStatusItem() {
         guard let b = statusItem?.button else { return }
+        // Orange while macOS is limiting performance, so throttling shows without opening the card.
+        let tint: NSColor? = monitor.throttle.limited ? .systemOrange : nil
+        if b.contentTintColor != tint { b.contentTintColor = tint }
         let title = monitor.menuTitle
         guard title != lastTitle else { return }
         lastTitle = title
@@ -424,6 +427,7 @@ struct ContentView: View {
                 .buttonStyle(.plain)
                 .help("Opens the release page on GitHub. You are on \(UpdateChecker.currentVersion).")
             }
+            throttleBanner
             networkSection
             batterySection
             HStack(alignment: .top, spacing: 10) {   // side by side: the two graphs share one row
@@ -436,7 +440,6 @@ struct ContentView: View {
                 powerSection
                 clocksSection
             }
-            throttleDetail
             if f.manual || !m.smcAvailable || m.fans.isEmpty { fansSection }   // in Auto the rpm shows in the control row
             fanControlRow
             memorySection
@@ -528,7 +531,7 @@ struct ContentView: View {
             }
         }
         .animation(anim, value: menuBarOpen)
-        .animation(anim, value: th.expanded)   // on the whole stack, so the section fades in while the card grows
+        .animation(anim, value: th.limited) // on the whole stack, so the section fades in while the card grows
         .padding(14)
         .frame(width: CardStyle.width)
     }
@@ -590,64 +593,67 @@ struct ContentView: View {
         return line
     }
 
-    /// Top-tier clock speed over the last minute as a share of its maximum, next to the Power graph. The graph turns
-    /// orange (and the header says "Limited") while macOS is holding the chip back; tapping opens the event list.
+    /// A slim strip at the top while macOS is limiting performance, with the cause; it goes away when throttling ends.
+    @ViewBuilder private var throttleBanner: some View {
+        if th.available && th.limited {
+            HStack(spacing: 6) {
+                Image(systemName: "exclamationmark.triangle.fill").font(.caption)
+                Text(th.causes.first.map { $0 + (th.causes.count > 1 ? " +\(th.causes.count - 1)" : "") } ?? "Performance limited")
+                    .font(.callout).lineLimit(1).minimumScaleFactor(0.8)
+                Spacer(minLength: 0)
+            }
+            .foregroundStyle(.orange)
+            .padding(.horizontal, 9)
+            .frame(maxWidth: .infinity, minHeight: 26)
+            .background(Color.orange.opacity(0.18))
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Color.orange.opacity(0.5)))
+            .help(th.causes.joined(separator: ", "))
+            .transition(appear)
+        }
+    }
+
+    /// Top-tier clock speed over the last minute as a share of its maximum, next to the Power graph. Stretches where
+    /// macOS was limiting performance are shaded orange. Hover for the recent events; right-click to clear them.
     @ViewBuilder private var clocksSection: some View {
         if th.available && !th.clockHistory.isEmpty {
-            let limited = th.limited
-            Button(action: { th.expanded.toggle() }) {
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 4) {
-                        Text("Clocks").font(.system(size: 13, weight: .semibold))
-                        Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold)).foregroundStyle(.secondary)
-                            .rotationEffect(.degrees(th.expanded ? 180 : 0))
-                        Spacer(minLength: 0)
-                        if limited {
-                            Label("Limited", systemImage: "exclamationmark.triangle.fill").labelStyle(.titleAndIcon)
-                                .font(.callout).foregroundStyle(.orange).lineLimit(1)
-                        } else if let c = th.topTierClock {
-                            Text(String(format: "%.1f GHz", c.mhz / 1000)).monospacedDigit().lineLimit(1)
-                        }
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 4) {
+                    Text("Clocks").font(.system(size: 13, weight: .semibold))
+                    Spacer(minLength: 0)
+                    if th.limited {
+                        Text("Limited").font(.callout).foregroundStyle(.orange).lineLimit(1)
+                    } else if let c = th.topTierClock {
+                        Text(String(format: "%.1f GHz", c.mhz / 1000)).monospacedDigit().lineLimit(1)
                     }
-                    HistoryGraph(values: th.clockHistory, capacity: Monitor.maxHistory, lastSample: m.lastSample,
-                                 color: limited ? .orange : .purple)
-                        .frame(height: 40)
-                        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(limited ? Color.orange.opacity(0.12) : Theme.subtleFill))
-                        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .strokeBorder(limited ? Color.orange.opacity(0.5) : Theme.hairline))
                 }
-                .contentShape(Rectangle())
+                HistoryGraph(values: th.clockHistory, capacity: Monitor.maxHistory, lastSample: m.lastSample,
+                             color: .purple, flags: th.limitedHistory)
+                    .frame(height: 40)
+                    .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Theme.subtleFill))
+                    .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Theme.hairline))
             }
-            .buttonStyle(.plain)
             .frame(maxWidth: .infinity)
+            .contentShape(Rectangle())
             .help(clocksTooltip)
-            .animation(anim, value: limited)
+            .contextMenu {
+                Button("Clear throttle history") { th.clearHistory() }.disabled(th.events.isEmpty && th.current == nil)
+            }
         }
     }
 
     private var clocksTooltip: String {
-        var parts: [String] = []
-        parts.append(th.limited ? th.causes.joined(separator: ", ") + "." : "Not throttled.")
-        parts.append("Clock speed of the busiest \(m.topTierName) cluster, as a share of its maximum.")
-        if !clockSummary.isEmpty { parts.append(clockSummary + ".") }
-        parts.append("Click for recent throttling events.")
-        return parts.joined(separator: " ")
-    }
-
-    /// The recent-throttling list under the Power / Clocks row.
-    @ViewBuilder private var throttleDetail: some View {
-        if th.available && th.expanded {
-            VStack(alignment: .leading, spacing: 4) {
-                if th.limited { Text(th.causes.joined(separator: ", ")).foregroundStyle(.orange) }
-                if let now = th.current { Text(eventLine(now, live: true)).foregroundStyle(.orange) }
-                ForEach(th.events.prefix(5)) { e in Text(eventLine(e, live: false)).foregroundStyle(.secondary) }
-                if th.current == nil && th.events.isEmpty { Text("No throttling recorded yet.").foregroundStyle(.secondary) }
-                else if !th.events.isEmpty { Button("Clear history") { th.clearHistory() }.buttonStyle(.plain).foregroundStyle(.blue) }
-            }
-            .font(.caption)
-            .fixedSize(horizontal: false, vertical: true)
-            .transition(appear)
+        var lines = ["Clock speed of the busiest \(m.topTierName) cluster, as a share of its maximum. Orange means macOS was limiting performance."]
+        if !clockSummary.isEmpty { lines.append(clockSummary + ".") }
+        if let now = th.current { lines.append("Now: " + eventLine(now, live: true)) }
+        let past = th.events.prefix(5)
+        if past.isEmpty && th.current == nil {
+            lines.append("No throttling recorded yet.")
+        } else if !past.isEmpty {
+            lines.append("Recent:")
+            lines.append(contentsOf: past.map { eventLine($0, live: false) })
         }
+        return lines.joined(separator: "\n")
     }
 
     private static let gib = 1_073_741_824.0   // Activity Monitor counts memory in GiB
@@ -943,6 +949,7 @@ final class GraphNSView: NSView {
     private let inset: CGFloat = 8
     private var color = NSColor.systemBlue
     private var values: [Double] = []
+    private var flags: [Bool] = []
     private var capacity = 2
     private var lastSample = Date()
     private var builtKey: [Double] = []   // count, sample time, capacity, width, height, scale of the last build
@@ -981,9 +988,9 @@ final class GraphNSView: NSView {
         }
     }
 
-    func update(values: [Double], capacity: Int, lastSample: Date, color: NSColor) {
+    func update(values: [Double], capacity: Int, lastSample: Date, color: NSColor, flags: [Bool] = []) {
         let colorChanged = color != self.color
-        self.values = values; self.capacity = capacity; self.lastSample = lastSample; self.color = color
+        self.values = values; self.capacity = capacity; self.lastSample = lastSample; self.color = color; self.flags = flags
         if colorChanged { builtKey = [] }
         rebuildIfNeeded()
     }
@@ -1042,11 +1049,19 @@ final class GraphNSView: NSView {
         area.addLine(to: CGPoint(x: points[0].x, y: 0))
         area.closeSubpath()
 
-        content.contents = renderImage(line: line, area: area, size: content.bounds.size, pad: pad, scale: scale)
+        // Shaded bands for the intervals flagged as limited (the flag of a sample covers the step that ends at it).
+        let flagged = Array(flags.suffix(n))
+        var bands: [CGRect] = []
+        if flagged.count == n {
+            for i in 1..<n where flagged[i] {
+                bands.append(CGRect(x: points[i - 1].x, y: 0, width: points[i].x - points[i - 1].x, height: h))
+            }
+        }
+        content.contents = renderImage(line: line, area: area, bands: bands, size: content.bounds.size, pad: pad, scale: scale)
     }
 
     /// Draws the gradient fill and the line into one bitmap (CPU), covering the plot plus `pad` on each side.
-    private func renderImage(line: CGPath, area: CGPath, size: CGSize, pad: CGFloat, scale: CGFloat) -> CGImage? {
+    private func renderImage(line: CGPath, area: CGPath, bands: [CGRect], size: CGSize, pad: CGFloat, scale: CGFloat) -> CGImage? {
         let pxW = Int(ceil(size.width * scale)), pxH = Int(ceil(size.height * scale))
         guard pxW > 0, pxH > 0,
               let ctx = CGContext(data: nil, width: pxW, height: pxH, bitsPerComponent: 8, bytesPerRow: 0,
@@ -1055,6 +1070,10 @@ final class GraphNSView: NSView {
         ctx.scaleBy(x: scale, y: scale)
         ctx.translateBy(x: pad, y: 0)    // paths are in plot coordinates; the image starts `pad` to the left
 
+        if !bands.isEmpty {
+            ctx.setFillColor(NSColor.systemOrange.withAlphaComponent(0.28).cgColor)
+            ctx.fill(bands)
+        }
         var line_c = color.cgColor
         effectiveAppearance.performAsCurrentDrawingAppearance { line_c = color.cgColor }
         let top = line_c.copy(alpha: 0.30) ?? line_c, bottom = line_c.copy(alpha: 0.02) ?? line_c
@@ -1080,10 +1099,11 @@ struct HistoryGraph: NSViewRepresentable {
     let capacity: Int
     let lastSample: Date
     let color: Color
+    var flags: [Bool] = []   // optional: one per value; true shades that stretch of the graph orange
 
     func makeNSView(context: Context) -> GraphNSView { GraphNSView() }
 
     func updateNSView(_ view: GraphNSView, context: Context) {
-        view.update(values: values, capacity: capacity, lastSample: lastSample, color: NSColor(color))
+        view.update(values: values, capacity: capacity, lastSample: lastSample, color: NSColor(color), flags: flags)
     }
 }

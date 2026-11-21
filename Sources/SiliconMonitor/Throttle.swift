@@ -166,7 +166,6 @@ struct ThrottleReading: Equatable {
 final class ThrottleMonitor: ObservableObject {
     struct Clock: Equatable { let name: String; let mhz: Double; let maxMHz: Double; let active: Double }
 
-    @Published var expanded = false          // the history list under the card row is open
     @Published private(set) var available = false
     @Published private(set) var causes: [String] = []
     @Published private(set) var thermalLevel = 0
@@ -176,11 +175,14 @@ final class ThrottleMonitor: ObservableObject {
     @Published private(set) var current: ThrottleEvent?
     /// The top-tier clock as a share of its maximum, one value per tick, for the Clocks graph (0...100).
     @Published private(set) var clockHistory: [Double] = []
+    /// Whether macOS was limiting performance at each of those ticks, so the graph can shade the throttled stretches.
+    @Published private(set) var limitedHistory: [Bool] = []
 
     var limited: Bool { !causes.isEmpty }
 
     private let report: IOReport?
     private var clearTicks = 0
+    private var currentIsFake = false   // the debug switch was on during this event, so it is not kept
     private let notifyToken: Int32?
     private typealias NotifyGet = @convention(c) (Int32, UnsafeMutablePointer<UInt64>) -> UInt32
     private let notifyGet: NotifyGet?
@@ -219,21 +221,25 @@ final class ThrottleMonitor: ObservableObject {
     func tick(cpuLoad: Double, gpuLoad: Double, cpuTemp: Double?, gpuTemp: Double?, power: Double?) {
         guard available else { return }
         var reading = ThrottleReading()
-        reading.thermalLevel = thermalPressure()
+        // Debug aid: `defaults write local.siliconmonitor fakeThrottle -bool true` reports moderate thermal pressure
+        // (and `defaults delete local.siliconmonitor fakeThrottle` ends it), to see the banner, tint and graph shading.
+        let fake = UserDefaults.standard.bool(forKey: "fakeThrottle")
+        reading.thermalLevel = fake ? 2 : thermalPressure()
         reading.gpuLoad = gpuLoad
         thermalLevel = reading.thermalLevel
         if let gpu = report?.read("GPU Stats") { Self.fill(&reading, gpu: gpu); gpuBudget = reading.gpuBudget }
-        if let cpu = report?.read("CPU Stats") {
-            clocks = Self.clocks(from: cpu)
-            if let c = topTierClock, c.maxMHz > 0 {
-                clockHistory.append(min(c.mhz / c.maxMHz * 100, 100))
-                if clockHistory.count > Monitor.maxHistory + 2 { clockHistory.removeFirst(clockHistory.count - Monitor.maxHistory - 2) }
-            }
-        }
+        if let cpu = report?.read("CPU Stats") { clocks = Self.clocks(from: cpu) }
 
         causes = reading.causes
+        if let c = topTierClock, c.maxMHz > 0 {
+            clockHistory.append(min(c.mhz / c.maxMHz * 100, 100))
+            limitedHistory.append(limited)
+            let extra = clockHistory.count - (Monitor.maxHistory + 2)
+            if extra > 0 { clockHistory.removeFirst(extra); limitedHistory.removeFirst(extra) }
+        }
         if limited {
             clearTicks = 0
+            if fake { currentIsFake = true }
             if current == nil {
                 current = ThrottleEvent(start: Date(), causes: causes, cpuLoad: cpuLoad, gpuLoad: gpuLoad)
             }
@@ -245,10 +251,13 @@ final class ThrottleMonitor: ObservableObject {
             clearTicks += 1
             if clearTicks >= 5 {             // clear for 5 s in a row ends it, so flicker is one event
                 event.end = Date().addingTimeInterval(-5)
-                events.insert(event, at: 0)
-                events = Array(events.prefix(20))
+                if !currentIsFake {              // faked events from the debug switch never reach the history
+                    events.insert(event, at: 0)
+                    events = Array(events.prefix(20))
+                    if let data = try? JSONEncoder().encode(events) { UserDefaults.standard.set(data, forKey: "throttleEvents") }
+                }
                 current = nil
-                if let data = try? JSONEncoder().encode(events) { UserDefaults.standard.set(data, forKey: "throttleEvents") }
+                currentIsFake = false
             }
         }
     }
