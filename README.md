@@ -36,7 +36,7 @@ only the Command Line Tools.
 - **Screen**: black out every display for cleaning (Esc or 2 minutes ends it)
 - **Stay on**: keep the display from sleeping
 - **Lid**: stay awake with the lid closed (`pmset disablesleep`, run by the helper, so no password prompt after the one-time install; it reverts if the app quits or crashes)
-- **Logo**: the glowing Apple logo, on or off, with **Breathe**, **Pulse**, **Beat** and **Dim** modes, plus **Music**, which flashes the logo to the beat of whatever the Mac is playing (a Core Audio tap; asks for audio capture permission once, macOS 14.2+)
+- **Logo**: the glowing Apple logo. Tap the tile to cycle **Auto**, **Breathe**, **Pulse**, **Beat** and **Dim**, then off (Dim shows a brightness slider). Right-click it to pick a mode directly, including **Music**, which flashes the logo to the beat of whatever the Mac is playing (a Core Audio tap; asks for audio capture permission once, macOS 14.2+)
   (MacBook Pro with a PROLED XDR display only; the tile doesn't appear on other Macs)
 - **Dark**: dark or light appearance
 - **Key light**: keyboard backlight, cycling Auto (ambient sensor), On (fixed level), Off

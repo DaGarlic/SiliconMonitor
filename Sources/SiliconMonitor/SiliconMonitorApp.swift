@@ -460,8 +460,9 @@ struct ContentView: View {
                          isOn: p.lidAwake, disabled: p.busy) { p.setLidAwake(!p.lidAwake) }
                         .help("Lid: keeps the Mac awake with the lid closed (uses the background helper; one admin password the first time)")
                     if l.available {
-                        Tile(icon: "applelogo", title: "Logo", subtitle: l.isOn ? "Lit" : "Off", isOn: l.isOn) { l.setOn(!l.isOn) }
-                            .help("The glowing Apple logo on the lid. Modes and brightness are below.")
+                        Tile(icon: "applelogo", title: "Logo", subtitle: l.isOn ? l.mode.title : "Off", isOn: l.isOn) { cycleLogo() }
+                            .help("The glowing Apple logo on the lid. Tap to cycle Auto, Breathe, Pulse, Beat, Dim, then Off. Right-click to pick a mode directly, including Music.")
+                            .contextMenu { logoMenu }
                     }
                     if t.darkModeAvailable {
                         Tile(icon: t.isDark ? "moon.fill" : "sun.max.fill", title: "Dark", subtitle: t.isDark ? "On" : "Light", isOn: t.isDark) {
@@ -480,7 +481,7 @@ struct ContentView: View {
                     }
                     .help("Hide the icons on the desktop (restarts Finder)")
                 }
-                if l.available && l.isOn { logoModes.transition(appear) }
+                if logoExtrasShown { logoExtras.transition(appear) }
                 if let msg = c.permissionMessage { note(msg, .orange).transition(appear) }
                 if p.lidAwake {
                     note("Lid-closed awake is ON. Don't put the Mac in a bag while it's on: it will stay hot. It turns off when you untick it or quit.", .orange)
@@ -488,7 +489,7 @@ struct ContentView: View {
                 }
                 if let e = p.lastError { note(e, .red).transition(appear) }
             }
-            .animation(anim, value: [l.available && l.isOn, c.permissionMessage != nil, p.lidAwake, p.lastError != nil])
+            .animation(anim, value: [logoExtrasShown, c.permissionMessage != nil, p.lidAwake, p.lastError != nil])
 
             if menuBarOpen {
             section("Menu bar") {
@@ -807,21 +808,46 @@ struct ContentView: View {
         .disabled(f.busy || !m.smcAvailable)
     }
 
-    /// Logo effects: Auto follows the screen, the rest are animations or a fixed level.
-    private var logoModes: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 5) {
-                ForEach(LogoControl.Mode.allCases) { mode in
-                    modePill(mode.title, on: l.mode == mode) { l.setMode(mode) }
-                        .help(mode == .music ? "Flash the logo to the beat of whatever the Mac is playing. Asks for audio capture permission the first time." : "")
-                }
+    /// Tap order for the Logo tile. Music is left out on purpose: reaching it by cycling would pop up the audio
+    /// capture permission prompt, so it is chosen from the right-click menu.
+    private static let logoCycle: [LogoControl.Mode] = [.auto, .breathe, .pulse, .heartbeat, .dim]
+
+    /// Off, then each mode in turn, then back to Off.
+    private func cycleLogo() {
+        guard l.isOn else { l.setOn(true); return }
+        if let i = Self.logoCycle.firstIndex(of: l.mode), i + 1 < Self.logoCycle.count {
+            l.setMode(Self.logoCycle[i + 1])
+        } else {
+            l.setOn(false)
+        }
+    }
+
+    @ViewBuilder private var logoMenu: some View {
+        Button { l.setOn(false) } label: {
+            if l.isOn { Text("Off") } else { Label("Off", systemImage: "checkmark") }
+        }
+        ForEach(LogoControl.Mode.allCases) { mode in
+            Button {
+                if !l.isOn { l.setOn(true) }
+                l.setMode(mode)
+            } label: {
+                if l.isOn && l.mode == mode { Label(mode.title, systemImage: "checkmark") } else { Text(mode.title) }
             }
+        }
+    }
+
+    /// Only the controls a mode needs: the Dim slider, and the note when Music could not start.
+    private var logoExtrasShown: Bool { l.available && l.isOn && (l.mode == .dim || l.musicNote != nil) }
+
+    private var logoExtras: some View {
+        VStack(alignment: .leading, spacing: 6) {
             if let note = l.musicNote {
                 Text(note).font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
                     .transition(appear)
             }
             if l.mode == .dim {
                 HStack(spacing: 8) {
+                    Image(systemName: "applelogo").font(.caption).foregroundStyle(.secondary)
                     Slider(value: Binding(get: { l.dim }, set: { l.setDim($0) }), in: 0.1...1)
                     Text("\(Int((l.dim * 100).rounded()))%").font(.caption).monospacedDigit().frame(width: 36, alignment: .trailing)
                 }
@@ -831,17 +857,6 @@ struct ContentView: View {
         .padding(.top, 2)
         .animation(anim, value: l.mode == .dim)
         .animation(anim, value: l.musicNote)
-    }
-
-    private func modePill(_ title: String, on: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(title).font(.system(size: 11, weight: .semibold)).lineLimit(1).fixedSize()
-                .padding(.horizontal, 7).padding(.vertical, 5)
-                .foregroundStyle(on ? Color.white : Color.primary)
-                .background(Capsule(style: .continuous).fill(on ? Color.accentColor : Theme.subtleFill))
-                .overlay(Capsule(style: .continuous).strokeBorder(on ? Color.clear : Theme.hairline))
-        }
-        .buttonStyle(.plain)
     }
 
     /// Target speed of the first fan, for the slider label.
