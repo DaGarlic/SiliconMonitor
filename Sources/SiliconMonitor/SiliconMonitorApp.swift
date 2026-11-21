@@ -351,6 +351,7 @@ struct Tile: View {
     let isOn: Bool
     var disabled = false
     var inline = false    // slim pill with the icon beside the label, for toggles that only need a name
+    var isAction = false  // a one-shot action rather than an on/off toggle: the icon is tinted so it reads as "do this"
     var compact = true   // shorter tile with tighter padding and text (false gives the roomier original size)
     let action: () -> Void
 
@@ -368,6 +369,7 @@ struct Tile: View {
                 } else {
                     VStack(alignment: .leading, spacing: 0) {
                         Image(systemName: icon).font(.system(size: compact ? 13 : 14, weight: .semibold))
+                            .foregroundStyle(isAction && !isOn ? Color.accentColor : (isOn ? Color.white : Color.primary))
                         Spacer(minLength: compact ? 2 : 6)
                         Text(title).font(.system(size: compact ? 10 : 11, weight: .semibold)).lineLimit(1).minimumScaleFactor(0.8)
                         if subtitle != "" {
@@ -403,6 +405,7 @@ struct ContentView: View {
     @EnvironmentObject var u: UpdateChecker
     @EnvironmentObject var th: ThrottleMonitor
     let onQuit: () -> Void
+    @AppStorage("menuBarOptionsOpen") private var menuBarOpen = false
 
     private let five = Array(repeating: GridItem(.flexible(), spacing: 6), count: 3)   // menu bar toggles are slim pills, three per row
     private let four = Array(repeating: GridItem(.flexible(), spacing: 6), count: 4)
@@ -423,12 +426,14 @@ struct ContentView: View {
             }
             networkSection
             batterySection
-            graph("CPU", value: m.cpu, temp: m.cpuTemp, history: m.cpuHistory, color: .blue)
+            HStack(alignment: .top, spacing: 10) {   // side by side: the two graphs share one row
+                graph("CPU", value: m.cpu, temp: m.cpuTemp, history: m.cpuHistory, color: .blue)
+                graph("GPU", value: m.gpu, temp: m.gpuTemp, history: m.gpuHistory, color: .green)
+                    .help(String(format: "%d GPU cores. Render %.0f%%  Tiler %.0f%%", m.gpuCoreCount, m.gpuRenderer, m.gpuTiler))
+            }
             coreBars
-            graph("GPU · \(m.gpuCoreCount) cores", value: m.gpu, temp: m.gpuTemp, history: m.gpuHistory, color: .green)
-                .help(String(format: "Render %.0f%%  Tiler %.0f%%", m.gpuRenderer, m.gpuTiler))
             powerSection
-            fansSection
+            if f.manual || !m.smcAvailable || m.fans.isEmpty { fansSection }   // in Auto the rpm shows in the control row
             fanControlRow
             throttleSection
             memorySection
@@ -436,11 +441,11 @@ struct ContentView: View {
 
             section("Tools") {
                 LazyVGrid(columns: four, spacing: 6) {   // four per row; more tools wrap onto further rows
-                    Tile(icon: "keyboard", title: "Keys", subtitle: c.keyboardLocked ? "Locked" : "Clean", isOn: c.keyboardLocked) {
+                    Tile(icon: "keyboard", title: "Keys", subtitle: c.keyboardLocked ? "Locked" : "Clean…", isOn: c.keyboardLocked, isAction: true) {
                         c.setKeyboardLocked(!c.keyboardLocked)
                     }
                     .help("Keyboard cleaning: locks all keys for up to 5 minutes")
-                    Tile(icon: "display", title: "Screen", subtitle: c.screenCleaning ? "Black" : "Clean", isOn: c.screenCleaning) {
+                    Tile(icon: "display", title: "Screen", subtitle: c.screenCleaning ? "Black" : "Clean…", isOn: c.screenCleaning, isAction: true) {
                         c.setScreenCleaning(!c.screenCleaning)
                     }
                     .help("Screen cleaning: blacks out the screen for up to 2 minutes (Esc exits)")
@@ -480,42 +485,46 @@ struct ContentView: View {
             }
             .animation(anim, value: [l.available && l.isOn, c.permissionMessage != nil, p.lidAwake, p.lastError != nil])
 
-            VStack(alignment: .leading, spacing: 8) {
-                Button(action: { m.menuBarOptionsOpen.toggle() }) {
+            if menuBarOpen {
+            section("Menu bar") {
+                LazyVGrid(columns: five, spacing: 6) {
+                    Tile(icon: "cpu", title: "CPU", subtitle: "", isOn: m.showCPU, inline: true) { m.showCPU.toggle() }
+                    Tile(icon: "square.stack.3d.up", title: "GPU", subtitle: "", isOn: m.showGPU, inline: true) { m.showGPU.toggle() }
+                    Tile(icon: "fan", title: "Fan", subtitle: "", isOn: m.showFan, inline: true) { m.showFan.toggle() }
+                    Tile(icon: "thermometer.medium", title: "CPU°", subtitle: "", isOn: m.showCPUTemp, inline: true) { m.showCPUTemp.toggle() }
+                    Tile(icon: "thermometer.high", title: "GPU°", subtitle: "", isOn: m.showGPUTemp, inline: true) { m.showGPUTemp.toggle() }
+                    Tile(icon: "internaldrive", title: "Disk", subtitle: "", isOn: m.showDisk, inline: true) { m.showDisk.toggle() }
+                }
+            }
+            .transition(appear)
+            }
+
+            // Footer: the set-once menu bar choices fold away; Quit is a quiet capsule, not a full-width button.
+            HStack {
+                Button(action: { menuBarOpen.toggle() }) {
                     HStack(spacing: 4) {
                         Text("MENU BAR OPTIONS").font(.system(size: 10.5, weight: .semibold)).tracking(0.4)
                         Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold))
-                            .rotationEffect(.degrees(m.menuBarOptionsOpen ? 180 : 0))
-                        Spacer(minLength: 0)
+                            .rotationEffect(.degrees(menuBarOpen ? 180 : 0))
                     }
                     .foregroundStyle(.secondary)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .help("Choose what appears in the menu bar")
-                if m.menuBarOptionsOpen {
-                    LazyVGrid(columns: five, spacing: 6) {
-                        Tile(icon: "cpu", title: "CPU", subtitle: "", isOn: m.showCPU, inline: true) { m.showCPU.toggle() }
-                        Tile(icon: "square.stack.3d.up", title: "GPU", subtitle: "", isOn: m.showGPU, inline: true) { m.showGPU.toggle() }
-                        Tile(icon: "fan", title: "Fan", subtitle: "", isOn: m.showFan, inline: true) { m.showFan.toggle() }
-                        Tile(icon: "thermometer.medium", title: "CPU°", subtitle: "", isOn: m.showCPUTemp, inline: true) { m.showCPUTemp.toggle() }
-                        Tile(icon: "thermometer.high", title: "GPU°", subtitle: "", isOn: m.showGPUTemp, inline: true) { m.showGPUTemp.toggle() }
-                        Tile(icon: "internaldrive", title: "Disk", subtitle: "", isOn: m.showDisk, inline: true) { m.showDisk.toggle() }
-                    }
-                    .transition(appear)
+                Spacer()
+                Button(action: onQuit) {
+                    Text("Quit").font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
+                        .padding(.horizontal, 8).padding(.vertical, 3)
+                        .background(Capsule(style: .continuous).fill(Theme.subtleFill))
+                        .contentShape(Capsule())
                 }
+                .buttonStyle(.plain)
+                .keyboardShortcut("q")
+                .help("Quit SiliconMonitor (⌘Q)")
             }
-            .animation(anim, value: m.menuBarOptionsOpen)
-
-            Button(action: onQuit) {
-                Text("Quit SiliconMonitor").font(.system(size: 12, weight: .medium))
-                    .frame(maxWidth: .infinity).padding(.vertical, 7)
-                    .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(Theme.subtleFill))
-                    .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).strokeBorder(Theme.hairline))
-            }
-            .buttonStyle(.plain)
-            .keyboardShortcut("q")
         }
+        .animation(anim, value: menuBarOpen)   // on the whole stack, so the section fades in while the card grows
         .padding(14)
         .frame(width: CardStyle.width)
     }
@@ -696,7 +705,7 @@ struct ContentView: View {
                     Text(String(format: "%.1f W", w)).monospacedDigit()
                 }
                 HistoryGraph(values: m.powerHistory.map { $0 / top * 100 }, capacity: Monitor.maxHistory, lastSample: m.lastSample, color: .orange)
-                    .frame(height: 56)
+                    .frame(height: 40)
                     .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Theme.subtleFill))
                     .overlay(alignment: .topTrailing) {
                         Text(String(format: "%.0f W", top)).font(.system(size: 9)).foregroundStyle(.secondary).padding(.trailing, 10).padding(.top, 2)
@@ -764,8 +773,10 @@ struct ContentView: View {
                     Slider(value: $f.percent, in: 0...100).frame(minWidth: 50).transition(.opacity)
                     Text(targetLabel).font(.caption).monospacedDigit().lineLimit(1).fixedSize().transition(.opacity)
                 } else {
-                    Text("Fans follow macOS").font(.caption).foregroundStyle(.secondary).transition(.opacity)
-                    Spacer()
+                    Spacer(minLength: 0)
+                    Text(m.fans.isEmpty ? "Fans follow macOS" : m.fans.map { String(format: "%.0f", $0.rpm) }.joined(separator: " · ") + " rpm")
+                        .font(.callout).monospacedDigit().lineLimit(1).transition(.opacity)
+                        .help("Fan speeds. Fans follow macOS.")
                 }
             }
             if let msg = f.message { note(msg, .orange).transition(appear) }
@@ -864,6 +875,7 @@ struct ContentView: View {
                 legend(.blue, "\(m.lowTierName) ×\(m.lowTierCount)")
                 legend(.orange, "\(m.topTierName) ×\(m.topTierCount)")
             }
+            .help("One bar per core, showing its load. \(m.lowTierName) cores are blue, \(m.topTierName) cores are orange.")
         }
     }
 
@@ -881,11 +893,11 @@ struct ContentView: View {
             HStack {
                 Text(name).font(.system(size: 13, weight: .semibold))
                 Spacer()
-                if let t = temp { Text(String(format: "%.0f°C", t)).monospacedDigit().foregroundStyle(.secondary) }
+                if let t = temp { Text(String(format: "%.0f°C", t)).monospacedDigit().foregroundStyle(Color.primary.opacity(0.75)) }
                 Text(String(format: "%.0f%%", value)).monospacedDigit()
             }
             HistoryGraph(values: history, capacity: Monitor.maxHistory, lastSample: m.lastSample, color: color)
-                .frame(height: 56)
+                .frame(height: 40)
                 .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Theme.subtleFill))
                 .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(Theme.hairline))
         }
