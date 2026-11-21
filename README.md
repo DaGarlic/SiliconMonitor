@@ -22,7 +22,7 @@ only the Command Line Tools.
 - CPU and GPU temperature, and the speed of each fan
 - Disk: remaining storage on the startup volume (read and write speed in the tooltip)
 - Battery health and charge cycle count
-- **Throttle detector**: whether macOS is limiting performance for heat or power (system thermal pressure and the GPU's thermal and power-limit counters), the clock speed of each core tier, and a history of when and why it happened (click the row)
+- **Throttle detector**: a Clocks graph beside the Power graph that follows the top core tier's clock speed and turns orange when macOS is limiting performance for heat or power (system thermal pressure and the GPU's thermal and power-limit counters). Click it for a history of when and why it happened
 - Network download and upload speed, and the power the whole Mac is drawing (watts)
 - RAM used and memory pressure (normal, warning, critical)
 - Choose what appears in the menu bar: CPU, GPU, fan speed, CPU temp, GPU temp, free disk space (fixed-width text, so it doesn't jitter)
@@ -114,8 +114,8 @@ ever installed the fan helper.
 ## Making a release (maintainers)
 
 ```sh
-./tools/make_dmg.sh 1.3          # builds SiliconMonitor-1.3.dmg (version number is optional)
-gh release create v1.3 SiliconMonitor-1.3.dmg --title "SiliconMonitor 1.3" --notes "What changed"
+./tools/make_dmg.sh 1.4          # builds SiliconMonitor-1.4.dmg (version number is optional)
+gh release create v1.4 SiliconMonitor-1.4.dmg --title "SiliconMonitor 1.4" --notes "What changed"
 ```
 
 `make_dmg.sh` runs `bundle.sh` with that version, packs the app with an Applications shortcut, and verifies the image.

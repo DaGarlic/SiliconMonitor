@@ -656,9 +656,9 @@ struct ContentView: View {
     /// and no space is wasted beside the bar. The fill is translucent so the text reads on top of it.
     private func barRow(icon: String, fraction: Double, color: Color, leading: Text? = nil, value: Text) -> some View {
         HStack(spacing: 7) {
-            Image(systemName: icon).font(.caption).foregroundStyle(.secondary)
             leading?.lineLimit(1).minimumScaleFactor(0.8)
             Spacer(minLength: 0)
+            Image(systemName: icon).font(.caption).foregroundStyle(.secondary)
             value.lineLimit(1).minimumScaleFactor(0.8)
         }
         .padding(.horizontal, 9)
@@ -718,7 +718,7 @@ struct ContentView: View {
     /// (at least 20 W, rounded up to 10), so quiet and heavy loads both fill the plot sensibly.
     @ViewBuilder private var powerSection: some View {
         if let w = m.systemPower {
-            let top = max(20, ((m.powerHistory.max() ?? 0) / 10).rounded(.up) * 10)
+            let top = max(20, ((m.powerHistory.max() ?? 0) * 1.3 / 10).rounded(.up) * 10)   // headroom keeps the scale label clear of the line
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
                     Text("Power").font(.system(size: 13, weight: .semibold))
@@ -744,7 +744,7 @@ struct ContentView: View {
         if m.batteryHealth != nil || m.cycleCount != nil || m.batteryPercent != nil {
             let pct = Double(m.batteryPercent ?? 0)
             let color: Color = pct <= 10 ? .red : pct <= 20 ? .orange : .green
-            barRow(icon: m.batteryCharging ? "battery.100percent.bolt" : "battery.100", fraction: pct / 100, color: color,
+            barRow(icon: m.batteryCharging ? "battery.100percent.bolt" : "battery.100", fraction: pct <= 20 ? pct / 100 : 0, color: color,   // a fill only when it matters
                    leading: Text(batteryInfo).font(.caption).foregroundStyle(Color.primary.opacity(0.75)),
                    value: Text(chargeStatus ?? "").font(.callout).monospacedDigit())
                 .help(chargeTooltip)

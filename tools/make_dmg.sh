@@ -1,10 +1,10 @@
 #!/bin/zsh
 # Builds SiliconMonitor-<version>.dmg: the app plus an Applications shortcut, ready to upload as a release.
-#   ./tools/make_dmg.sh            version 1.3
-#   ./tools/make_dmg.sh 1.3
+#   ./tools/make_dmg.sh            version 1.4
+#   ./tools/make_dmg.sh 1.4
 set -e
 cd "$(dirname "$0")/.."
-VERSION="${1:-1.3}"
+VERSION="${1:-1.4}"
 VERSION="$VERSION" ./bundle.sh
 
 STAGE="$(mktemp -d)"
